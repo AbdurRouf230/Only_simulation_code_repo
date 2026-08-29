@@ -1,0 +1,176 @@
+# IntelleSwarm AI - Pollination Drone Configuration
+# Optimized parameters for precision agricultural missions
+
+# Physical drone specifications
+drone_specs:
+  max_flight_time: 1800  # 30 minutes
+  payload_capacity: 2.0  # 2kg pollination system
+  max_speed: 15.0  # m/s
+  cruise_speed: 8.0  # m/s for precision work
+  min_altitude: 2.0  # meters above crops
+  max_altitude: 50.0  # meters
+  safety_radius: 5.0  # minimum distance between drones
+
+# Pollination mission parameters
+pollination:
+  coverage_height: 3.0  # meters above flowers
+  pollination_speed: 2.0  # m/s for effective pollination
+  overlap_percentage: 20  # coverage overlap for thoroughness
+  flower_detection_range: 10.0  # meters
+  pollen_dispensing_rate: 50  # particles per second
+
+  # Flower types and priorities
+  flower_priorities:
+    sunflower: 100  # Highest priority - commercial value
+    clover: 80      # High priority - livestock feed
+    wildflower: 40  # Medium priority - biodiversity
+    weed: 10        # Low priority - minimal pollination
+
+# Flight patterns for different crops
+flight_patterns:
+  sunflower:
+    pattern_type: "circular"
+    radius: 15.0
+    altitude: 3.0
+    speed: 2.0
+
+  clover:
+    pattern_type: "lawn_mower"
+    strip_width: 5.0
+    altitude: 2.5
+    speed: 2.5
+
+  wildflower:
+    pattern_type: "random_walk"
+    area_bounds: [40, 40]
+    altitude: 3.5
+    speed: 3.0
+
+# Safety and emergency protocols
+safety:
+  geo_fence:
+    vertices:
+      - [-200, -200]  # Southwest corner
+      - [200, -200]   # Southeast corner
+      - [200, 200]    # Northeast corner
+      - [-200, 200]   # Northwest corner
+    max_altitude: 50
+
+  emergency_procedures:
+    low_battery_threshold: 25  # percent
+    return_to_home_altitude: 20  # meters
+    emergency_landing_speed: 1.0  # m/s
+
+  collision_avoidance:
+    detection_range: 15.0  # meters
+    avoidance_distance: 5.0  # meters
+    reaction_time: 0.5  # seconds
+
+# Sensor configurations
+sensors:
+  camera:
+    resolution: [1920, 1080]
+    fps: 30
+    field_of_view: 80  # degrees
+
+  lidar:
+    range: 50.0  # meters
+    resolution: 0.1  # degrees
+    frequency: 10  # Hz
+
+  gps:
+    accuracy: 0.5  # meters
+    update_rate: 10  # Hz
+
+  imu:
+    gyro_range: 2000  # degrees/s
+    accel_range: 16  # g
+
+  environmental:
+    wind_sensor: true
+    humidity_sensor: true
+    temperature_sensor: true
+
+# Communication settings
+communication:
+  mesh_network:
+    frequency: 2400  # MHz
+    range: 1000  # meters
+    protocol: "802.11s"
+
+  ground_station:
+    telemetry_rate: 10  # Hz
+    command_timeout: 5  # seconds
+
+  inter_drone:
+    heartbeat_interval: 1  # seconds
+    position_share_rate: 5  # Hz
+
+# Mission planning
+mission:
+  takeoff:
+    sequence: "sequential"  # or "simultaneous"
+    interval: 10  # seconds between takeoffs
+    formation: "line"  # initial formation
+
+  coverage:
+    algorithm: "marl_optimization"  # Use MARL algorithms
+    optimization_target: "time_and_coverage"
+
+  landing:
+    sequence: "simultaneous"
+    location: "home_base"
+
+# MARL Algorithm Configuration
+marl:
+  algorithm: "mappo"  # Primary algorithm for coordination
+
+  mappo:
+    learning_rate: 0.0003
+    gamma: 0.99
+    clip_epsilon: 0.2
+    value_loss_coef: 0.5
+    entropy_coef: 0.01
+
+  qmix:
+    learning_rate: 0.0005
+    epsilon_start: 1.0
+    epsilon_end: 0.05
+    epsilon_decay: 0.995
+
+  observation_space:
+    own_position: 3     # x, y, z
+    own_velocity: 3     # vx, vy, vz
+    battery_level: 1    # percentage
+    flower_detection: 8 # nearby flowers
+    neighbor_positions: 15  # 5 nearest neighbors * 3
+    environmental: 3    # wind, humidity, temperature
+    mission_status: 3   # progress, objectives, time remaining
+
+  action_space:
+    velocity_control: 4  # vx, vy, vz, yaw_rate
+    pollination_control: 1  # on/off
+
+# Data collection and analysis
+data_collection:
+  mission_logging: true
+  performance_metrics: true
+  flower_mapping: true
+  pollination_effectiveness: true
+
+  storage:
+    local_storage: "/data/missions"
+    cloud_backup: true
+    compression: "lz4"
+
+# Integration with existing systems
+integration:
+  intelleswarm_framework: true
+  assistive_pollination_module: true
+  ros2_bridge: true
+
+  topic_mappings:
+    state_input: "/drone_{id}/state"
+    command_output: "/drone_{id}/cmd_vel"
+    mission_status: "/drone_{id}/mission_status"
+    flower_detection: "/drone_{id}/flower_detection"

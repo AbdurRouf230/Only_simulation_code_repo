@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+pollination_simulation_results_*.json
+*.log
+.DS_Store
