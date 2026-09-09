@@ -64,8 +64,46 @@ def find_px4_dir(preferred: str) -> str:
     return str(Path(os.path.expanduser(preferred)).resolve())
 
 
-def _cmd_exists(name: str) -> bool:
-    return subprocess.run(["which", name], capture_output=True).returncode == 0
+def _can_import_px4_msgs() -> bool:
+    try:
+        from px4_msgs.msg import VehicleCommand  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def find_ros2_overlay_setups() -> list[str]:
+    """Workspaces named ros2_ws, ws_ros2, or the colcon ws that contains this repo."""
+    found: list[str] = []
+
+    def add(path: Path) -> None:
+        try:
+            resolved = path.expanduser().resolve()
+        except OSError:
+            return
+        if resolved.is_file() and str(resolved) not in found:
+            found.append(str(resolved))
+
+    if os.environ.get("ROS2_WS"):
+        add(Path(os.environ["ROS2_WS"]) / "install" / "setup.bash")
+
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        add(parent / "install" / "setup.bash")
+
+    home = Path.home()
+    for name in ("ws_ros2", "ros2_ws", "ros2_humble_ws", "colcon_ws"):
+        add(home / name / "install" / "setup.bash")
+
+    for key in ("COLCON_PREFIX_PATH", "AMENT_PREFIX_PATH"):
+        for part in os.environ.get(key, "").split(":"):
+            if not part:
+                continue
+            p = Path(part)
+            add(p / "setup.bash")
+            add(p.parent / "setup.bash")
+
+    return found
 
 
 def stop_stale_simulation() -> None:
@@ -170,7 +208,10 @@ class PollinationSimulationRunner:
         except Exception as exc:
             print(f"❌ Cannot import rclpy/px4_msgs: {exc}")
             print("   source /opt/ros/humble/setup.bash")
-            print("   source ~/ros2_ws/install/setup.bash")
+            print("   source ~/ws_ros2/install/setup.bash   # or ~/ros2_ws/install/setup.bash")
+            print("   If px4_msgs is not built:")
+            print("     cd ~/ws_ros2 && git clone https://github.com/PX4/px4_msgs.git src/px4_msgs")
+            print("     colcon build --packages-select px4_msgs && source install/setup.bash")
             ok = False
 
         world_file = self.current_dir / self.config.world_file
@@ -415,35 +456,36 @@ class PollinationSimulationRunner:
             repo_root = Path(__file__).resolve().parents[2]
             auto_start = os.environ.get('POLLINATION_AUTO_START', '1')
             home = os.environ.get('HOME') or os.path.expanduser('~')
-            ros2_ws = os.environ.get('ROS2_WS') or os.path.join(home, 'ros2_ws')
-            ros2_overlay = os.path.join(ros2_ws, 'install', 'setup.bash')
-            if use_ros2:
-                coord_cmd = [
-                    'bash', '-c',
-                    f'source /opt/ros/humble/setup.bash && '
-                    f'[ -f "{ros2_overlay}" ] && source "{ros2_overlay}"; '
-                    f'export HOME="{home}" && '
-                    f'export PYTHONPATH="{repo_root}:$PYTHONPATH" && '
-                    f'export PYTHONUNBUFFERED=1 && '
-                    f'export POLLINATION_AUTO_START="{auto_start}" && '
-                    f'export POLLINATION_NUM_DRONES="{self.config.num_drones}" && '
-                    f'export POLLINATION_DURATION="{self.config.simulation_duration}" && '
-                    f'python3 "{coordination_script}"'
-                ]
+            env = os.environ.copy()
+            env['HOME'] = home
+            env['PYTHONUNBUFFERED'] = '1'
+            env['POLLINATION_AUTO_START'] = auto_start
+            env['POLLINATION_NUM_DRONES'] = str(self.config.num_drones)
+            env['POLLINATION_DURATION'] = str(self.config.simulation_duration)
+            env['PYTHONPATH'] = f"{repo_root}:{env.get('PYTHONPATH', '')}"
+
+            if _can_import_px4_msgs():
+                print("✅ px4_msgs already importable in this shell — launching coord with current env")
+                coord_cmd = [sys.executable or "python3", str(coordination_script)]
+                coord_process = subprocess.Popen(coord_cmd, env=env)
             else:
+                overlays = find_ros2_overlay_setups()
+                if overlays:
+                    print("   Sourcing ROS overlays:")
+                    for ov in overlays:
+                        print(f"     {ov}")
+                else:
+                    print("   No colcon overlay found (looked for ~/ws_ros2 and ~/ros2_ws)")
+                    print("   Build px4_msgs, then: source ~/ws_ros2/install/setup.bash")
+                source_cmd = 'source /opt/ros/humble/setup.bash'
+                for ov in overlays:
+                    source_cmd += f' && source "{ov}"'
                 coord_cmd = [
                     'bash', '-c',
-                    f'export PYTHONPATH="{repo_root}:$PYTHONPATH" && '
-                    f'export PYTHONUNBUFFERED=1 && '
-                    f'export POLLINATION_AUTO_START="{auto_start}" && '
-                    f'export POLLINATION_NUM_DRONES="{self.config.num_drones}" && '
-                    f'export POLLINATION_DURATION="{self.config.simulation_duration}" && '
-                    f'python3 "{coordination_script}"'
+                    f'{source_cmd} && python3 "{coordination_script}"',
                 ]
+                coord_process = subprocess.Popen(coord_cmd, env=env)
 
-            coord_process = subprocess.Popen(coord_cmd)
-
-            # Node builds 6 DroneControllers; import crashes show up immediately
             time.sleep(8)
 
             if coord_process.poll() is None:
@@ -453,6 +495,10 @@ class PollinationSimulationRunner:
             else:
                 print("❌ IntelleSwarm coordination exited immediately "
                       f"(code {coord_process.returncode})")
+                print("   Torch warnings are OK. The flight node needs px4_msgs:")
+                print("     source /opt/ros/humble/setup.bash")
+                print("     source ~/ws_ros2/install/setup.bash")
+                print("     cd ~/ws_ros2 && colcon build --packages-select px4_msgs")
                 return False
 
         except Exception as e:

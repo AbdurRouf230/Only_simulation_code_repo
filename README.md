@@ -51,6 +51,16 @@ If PX4 is not under `~/PX4-Main/PX4-Autopilot`:
 python3 run_pollination_simulation.py --num-drones 6 --duration 200 --px4-dir ~/PX4-Autopilot
 ```
 
+If your ROS workspace is `~/ws_ros2` (not `~/ros2_ws`):
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ws_ros2/install/setup.bash
+export ROS2_WS=$HOME/ws_ros2
+```
+
+`No module named 'px4_msgs'` means the overlay was not sourced or px4_msgs is not built. Torch is optional; it does not fly the drones.
+
 Headless (no Gazebo window):
 
 ```bash
