@@ -70,6 +70,10 @@ python3 -m pip install --user --upgrade pip || true
 python3 -m pip install --user pyyaml numpy pymavlink || true
 
 # ---- PX4 ----
+if [[ -x "$HOME/PX4-Autopilot/build/px4_sitl_default/bin/px4" && ! -x "$PX4_DIR/build/px4_sitl_default/bin/px4" ]]; then
+  PX4_DIR="$HOME/PX4-Autopilot"
+  echo "Using existing PX4 at $PX4_DIR"
+fi
 if [[ "${SKIP_PX4_BUILD:-0}" == "1" ]]; then
   echo "SKIP_PX4_BUILD=1"
 elif [[ -x "$PX4_DIR/build/px4_sitl_default/bin/px4" ]]; then

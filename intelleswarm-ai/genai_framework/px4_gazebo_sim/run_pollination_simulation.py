@@ -34,6 +34,52 @@ import signal
 repo_root = str(Path(__file__).parent.parent.parent.absolute())
 sys.path.insert(0, repo_root)
 
+
+def _is_wsl() -> bool:
+    try:
+        text = Path("/proc/version").read_text(encoding="utf-8", errors="ignore").lower()
+        return "microsoft" in text or "wsl" in text
+    except OSError:
+        return False
+
+
+def find_px4_dir(preferred: str) -> str:
+    """Use a built PX4 tree; do not require the folder name PX4-Main."""
+    seen: list[Path] = []
+    for raw in (
+        os.environ.get("PX4_DIR"),
+        preferred,
+        "~/PX4-Main/PX4-Autopilot",
+        "~/PX4-Autopilot",
+        "~/src/PX4-Autopilot",
+    ):
+        if not raw:
+            continue
+        path = Path(os.path.expanduser(raw)).resolve()
+        if path in seen:
+            continue
+        seen.append(path)
+        if (path / "build" / "px4_sitl_default" / "bin" / "px4").is_file():
+            return str(path)
+    return str(Path(os.path.expanduser(preferred)).resolve())
+
+
+def _cmd_exists(name: str) -> bool:
+    return subprocess.run(["which", name], capture_output=True).returncode == 0
+
+
+def stop_stale_simulation() -> None:
+    """A second run fails if the previous Gazebo/PX4/XRCE is still up."""
+    print("Cleaning leftover gz / px4 / MicroXRCEAgent / coord processes...")
+    for args in (
+        ["pkill", "-f", "gz sim"],
+        ["pkill", "-x", "px4"],
+        ["pkill", "-f", "MicroXRCEAgent"],
+        ["pkill", "-f", "ros2_node_intelleswarm_pollination.py"],
+    ):
+        subprocess.run(args, capture_output=True)
+    time.sleep(2)
+
 @dataclass
 class SimulationConfig:
     """Configuration for pollination simulation"""
@@ -93,45 +139,53 @@ class PollinationSimulationRunner:
     def validate_environment(self) -> bool:
         """Validate that all required components are available"""
         print("🔍 Validating simulation environment...")
+        ok = True
 
-        # Check PX4-Autopilot
         px4_path = Path(self.config.px4_dir)
-        if not px4_path.exists():
-            print(f"❌ PX4-Autopilot not found at: {self.config.px4_dir}")
-            print("   Please install PX4-Autopilot and set correct path")
-            return False
-
         px4_executable = px4_path / "build" / "px4_sitl_default" / "bin" / "px4"
-        if not px4_executable.exists():
-            print(f"❌ PX4 not built. Please run: cd {self.config.px4_dir} && make px4_sitl gz_x500")
-            return False
+        if not px4_executable.is_file():
+            print(f"❌ PX4 SITL not found at: {px4_executable}")
+            print("   export PX4_DIR=/path/to/PX4-Autopilot")
+            print("   cd \"$PX4_DIR\" && make px4_sitl gz_x500_mono_cam")
+            ok = False
+        else:
+            print(f"✅ PX4 SITL: {px4_path}")
 
-        # Check Gazebo
-        try:
-            result = subprocess.run(['which', 'gz'], capture_output=True, text=True)
-            if result.returncode != 0:
-                print("❌ Gazebo not found. Please install Gazebo simulation")
-                return False
+        if not _cmd_exists("gz"):
+            print("❌ Gazebo Harmonic not found (`gz`). Install: sudo apt install gz-harmonic")
+            ok = False
+        else:
             print("✅ Gazebo (gz) found")
-        except FileNotFoundError:
-            print("❌ Cannot check for Gazebo installation")
-            return False
 
-        # Check world file
+        if not _cmd_exists("MicroXRCEAgent"):
+            print("❌ MicroXRCEAgent not in PATH")
+            ok = False
+        else:
+            print("✅ MicroXRCEAgent found")
+
+        try:
+            import rclpy  # noqa: F401
+            from px4_msgs.msg import VehicleCommand  # noqa: F401
+            print("✅ ROS 2 Humble + px4_msgs import OK")
+        except Exception as exc:
+            print(f"❌ Cannot import rclpy/px4_msgs: {exc}")
+            print("   source /opt/ros/humble/setup.bash")
+            print("   source ~/ros2_ws/install/setup.bash")
+            ok = False
+
         world_file = self.current_dir / self.config.world_file
         if not world_file.exists():
             print(f"❌ World file not found: {world_file}")
-            return False
+            ok = False
 
-        # Check IntelleSwarm framework
-        try:
-            import torch
-            print("✅ PyTorch available")
-        except ImportError:
-            print("⚠️  PyTorch not available - some AI features may be limited")
+        ctrl = self.current_dir / "multi_drone_script" / "drone_controller.py"
+        if not ctrl.is_file():
+            print(f"❌ Missing {ctrl} — pull the latest repo")
+            ok = False
 
-        print("✅ Environment validation complete")
-        return True
+        if ok:
+            print("✅ Environment validation complete")
+        return ok
 
     def _apply_px4_gz_env(self, env: dict) -> dict:
         """Match make px4_sitl / gz_env.sh so IMU, GPS, and motors work."""
@@ -161,8 +215,12 @@ class PollinationSimulationRunner:
         env["GZ_IP"] = env.get("GZ_IP", "127.0.0.1")
         env["DISPLAY"] = env.get("DISPLAY") or ":0"
         env.setdefault("LIBGL_ALWAYS_SOFTWARE", "0")
-        env.setdefault("GALLIUM_DRIVER", "d3d12")
-        env.setdefault("MESA_D3D12_DEFAULT_ADAPTER_NAME", "NVIDIA")
+        # d3d12 is WSL/Windows GPU only — it breaks Gazebo on normal Ubuntu.
+        if _is_wsl():
+            env.setdefault("GALLIUM_DRIVER", "d3d12")
+            env.setdefault("MESA_D3D12_DEFAULT_ADAPTER_NAME", "NVIDIA")
+        elif env.get("GALLIUM_DRIVER") == "d3d12":
+            env.pop("GALLIUM_DRIVER", None)
         return env
 
     def _wait_for_gz_world(self, world_name: str = "agricultural_farm", timeout_sec: int = 60) -> bool:
@@ -645,7 +703,7 @@ class PollinationSimulationRunner:
         print("="*60)
 
         try:
-            # Validation
+            stop_stale_simulation()
             if not self.validate_environment():
                 print("❌ Environment validation failed")
                 return {}
@@ -715,11 +773,14 @@ def main():
     if args.num_drones < 1:
         parser.error('--num-drones must be at least 1')
 
+    px4_dir = find_px4_dir(args.px4_dir)
+    print(f"Using PX4_DIR={px4_dir}")
+
     config = SimulationConfig(
         num_drones=args.num_drones,
         simulation_duration=args.duration,
         enable_gui=not args.headless,
-        px4_dir=os.path.expanduser(args.px4_dir)
+        px4_dir=px4_dir,
     )
 
     runner = PollinationSimulationRunner(config)

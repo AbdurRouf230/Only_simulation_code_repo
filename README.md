@@ -84,6 +84,48 @@ intelleswarm-ai/genai_framework/px4_gazebo_sim/
 
 ## Notes
 
+- `bash install_and_run.sh` already starts the mission. Do **not** also run `python3 run_pollination_simulation.py` in another terminal unless the installer finished or you used `SKIP_RUN=1`.
 - Do not run two Gazebo / PX4 sessions at once.
-- Stop a run with Ctrl+C. If leftovers remain: `pkill -f "gz sim"; pkill -x px4; pkill -f MicroXRCEAgent`.
+- Stop a run with Ctrl+C. Leftovers: `pkill -f "gz sim"; pkill -x px4; pkill -f MicroXRCEAgent`.
 - Camera stills (if captured) go under `multi_drone_script/captures/`.
+
+## If it does not start
+
+Clone as your normal user into home, not as root into `/`:
+
+```bash
+cd ~
+git clone https://github.com/AbdurRouf230/Only_simulation_code_repo.git
+cd Only_simulation_code_repo
+git pull
+```
+
+Kill any leftover sim, then run **only one** of these:
+
+```bash
+pkill -f "gz sim"; pkill -x px4; pkill -f MicroXRCEAgent; pkill -f ros2_node_intelleswarm_pollination.py
+
+# A) installer (installs missing deps, then flies)
+SKIP_INSTALL=1 bash install_and_run.sh
+
+# B) manual (same thing, after source)
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+cd ~/Only_simulation_code_repo/intelleswarm-ai/genai_framework/px4_gazebo_sim
+python3 run_pollination_simulation.py --num-drones 6 --duration 200
+```
+
+Quick checks:
+
+```bash
+which gz
+which MicroXRCEAgent
+ls ~/PX4-Main/PX4-Autopilot/build/px4_sitl_default/bin/px4
+ls ~/PX4-Autopilot/build/px4_sitl_default/bin/px4
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+python3 -c "from px4_msgs.msg import VehicleCommand; print('px4_msgs ok')"
+```
+
+If PX4 lives in `~/PX4-Autopilot`, pass `--px4-dir ~/PX4-Autopilot`.
+If there is no GUI, add `--headless`.
