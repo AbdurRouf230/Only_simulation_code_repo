@@ -106,6 +106,10 @@ def find_ros2_overlay_setups() -> list[str]:
     return found
 
 
+def _cmd_exists(name: str) -> bool:
+    return subprocess.run(["which", name], capture_output=True).returncode == 0
+
+
 def stop_stale_simulation() -> None:
     """A second run fails if the previous Gazebo/PX4/XRCE is still up."""
     print("Cleaning leftover gz / px4 / MicroXRCEAgent / coord processes...")
