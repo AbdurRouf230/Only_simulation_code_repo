@@ -19,6 +19,9 @@ Compatible with agricultural_farm.world and px4_multi_drone.sh
 """
 
 import math
+import os
+import sys
+import threading
 import yaml
 import time
 from typing import Dict, Any, List, Tuple, Optional
@@ -27,30 +30,73 @@ from pathlib import Path
 
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import ExternalShutdownException
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
-# ROS message types
-from geometry_msgs.msg import Twist, PoseStamped, Vector3Stamped
+from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
-from sensor_msgs.msg import Image, PointCloud2, NavSatFix
-from std_msgs.msg import Float32, Bool, String, Header
-from geographic_msgs.msg import GeoPoseStamped
+from sensor_msgs.msg import Image
+from std_msgs.msg import String, Float32MultiArray
 
-# Custom message types (would be defined separately)
-from std_msgs.msg import Float32MultiArray  # Temporary for flower detection data
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
-# IntelleSwarm core imports
-import sys
-sys.path.insert(0, '/Users/zrahman/intelleswarm-ai')
+_MULTI_SCRIPT = Path(__file__).resolve().parent / "multi_drone_script"
+_CONTROLLER_CANDIDATES = [
+    _MULTI_SCRIPT,
+    Path(os.environ.get("DRONE_CONTROLLER_DIR", "")),
+    Path.home() / "ros2_ws" / "src" / "px4_python" / "MultiDrone",
+    Path("/home/rouf/ros2_ws/src/px4_python/MultiDrone"),
+    Path("/mnt/e/Multi Drone project/Main setup/main_used_code_in_script"),
+    Path(__file__).resolve().parent.parent.parent.parent / "main_used_code_in_script",
+]
+_CONTROLLER_CANDIDATES = [p for p in _CONTROLLER_CANDIDATES if str(p).strip() not in ("", ".")]
+for _p in (_MULTI_SCRIPT, *_CONTROLLER_CANDIDATES):
+    if _p.is_dir() and str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 try:
     from genai_framework.sdk import DroneBrain, EnvReading, GeoFence, SafetyManager, Pose
-    from assistive_pollination.swarm_coordination import SwarmCoordinator
-    from assistive_pollination.agricultural_ai import FlowerDetector, CoverageOptimizer
-    from assistive_pollination.mission_planning import PollinationMissionPlanner
 except ImportError as e:
-    print(f"Warning: Could not import IntelleSwarm modules: {e}")
-    print("Running in simulation mode without full AI integration")
+    print(f"Warning: Could not import IntelleSwarm SDK: {e}")
+    DroneBrain = EnvReading = GeoFence = SafetyManager = Pose = None
+
+try:
+    from assistive_pollination.models.flower_detector import FlowerDetector
+except ImportError as e:
+    print(f"Warning: FlowerDetector not available: {e}")
+    FlowerDetector = None
+
+# Prebuilt multi_drone_script stack (not reimplemented here)
+from collision_avoidance import FleetRegistry  # noqa: E402
+from drone_controller import DroneController  # noqa: E402
+from mission_logic import FleetDrone, run_grid_mission_fleet, land_and_wait  # noqa: E402
+from multi_drone_config import FLEET_STATE_PATH  # noqa: E402
+from multi_mission_runner import mission_thread  # noqa: E402
+from ros_thread_spin import install_thread_safe_spin  # noqa: E402
+
+
+class CoverageOptimizer:
+    """Lightweight coverage helper used when the dedicated module is absent."""
+
+    def __init__(self, *args, **kwargs):
+        self.overlap_percentage = kwargs.get("overlap_percentage", 20)
+
+
+class SwarmCoordinator:
+    """In-process swarm coordinator matching the node constructor."""
+
+    def __init__(self, num_drones: int = 6, communication_range: float = 1000.0, **kwargs):
+        self.num_drones = num_drones
+        self.communication_range = communication_range
+
+
+class PollinationMissionPlanner:
+    """In-process mission planner matching the node constructor."""
+
+    def __init__(self, *args, **kwargs):
+        self.max_drones = kwargs.get("max_drones", 6)
 
 # Configuration
 @dataclass
@@ -95,6 +141,11 @@ class IntelleSwarmPollinationNode(Node):
         # ROS communication setup
         self._setup_ros_communication()
 
+        # Prebuilt PX4 fleet (DroneController + FleetRegistry collision avoidance)
+        self.fleet_drones: Dict[str, FleetDrone] = {}
+        self.mission_threads: List[threading.Thread] = []
+        self._init_px4_fleet()
+
         # Mission state
         self.mission_active = False
         self.mission_start_time = None
@@ -111,6 +162,9 @@ class IntelleSwarmPollinationNode(Node):
 
         self.get_logger().info("🚁 Pollination system initialized and ready!")
 
+        self._auto_start = os.environ.get("POLLINATION_AUTO_START", "1") != "0"
+        self._duration_sec = float(os.environ.get("POLLINATION_DURATION", "0") or 0)
+
     def _load_configuration(self):
         """Load pollination mission configuration"""
         config_path = Path(__file__).parent / "pollination_drone_config.yaml"
@@ -123,7 +177,8 @@ class IntelleSwarmPollinationNode(Node):
             self.config = self._default_config()
 
         # Extract key configurations
-        self.drone_ids = [f"drone_{i}" for i in range(1, 7)]  # 6 drones
+        self.num_drones = max(1, int(os.environ.get("POLLINATION_NUM_DRONES", "6")))
+        self.drone_ids = [f"drone_{i}" for i in range(1, self.num_drones + 1)]
         self.obs_dim = 32
         self.msg_dim = 16
         self.action_dim = 5  # vx, vy, vz, yaw_rate, pollination_rate
@@ -160,17 +215,13 @@ class IntelleSwarmPollinationNode(Node):
         self.get_logger().info("🌾 Initializing Agricultural AI components...")
 
         try:
-            # Flower detection system
-            self.flower_detector = FlowerDetector()
-
-            # Coverage optimization
+            self.flower_detector = FlowerDetector() if FlowerDetector else None
             self.coverage_optimizer = CoverageOptimizer()
-
             self.get_logger().info("✅ Agricultural AI components loaded")
         except Exception as e:
             self.get_logger().warn(f"Agricultural AI components not available: {e}")
             self.flower_detector = None
-            self.coverage_optimizer = None
+            self.coverage_optimizer = CoverageOptimizer()
 
     def _init_mission_planning(self):
         """Initialize mission planning system"""
@@ -204,22 +255,11 @@ class IntelleSwarmPollinationNode(Node):
             self.get_logger().warn(f"Swarm coordinator not available: {e}")
             self.swarm_coordinator = None
 
-        # Initialize drone brains with pollination-specific parameters
+        # Brains are loaded lazily — constructing 6 models here delays PX4 takeoff
         self.drone_brains = {}
         self.drone_status = {}
 
         for drone_id in self.drone_ids:
-            try:
-                self.drone_brains[drone_id] = DroneBrain(
-                    obs_dim=self.obs_dim,
-                    msg_dim=self.msg_dim,
-                    action_dim=self.action_dim,
-                    world_latent_dim=16,
-                    enable_collision_avoidance=True
-                )
-            except Exception as e:
-                self.get_logger().warn(f"DroneBrain not available for {drone_id}: {e}")
-
             self.drone_status[drone_id] = DroneStatus(
                 drone_id=drone_id,
                 position=(0.0, 0.0, 0.0),
@@ -234,12 +274,18 @@ class IntelleSwarmPollinationNode(Node):
         """Initialize safety and geo-fencing systems"""
         self.get_logger().info("🛡️ Initializing Safety Systems...")
 
-        # Create geo-fence from config
         fence_vertices = self.config['safety']['geo_fence']['vertices']
-        self.farm_fence = GeoFence(vertices=fence_vertices)
+        self.farm_fence = None
+        self.safety_manager = None
+
+        if GeoFence is None:
+            self.get_logger().warn("GeoFence not available, safety fence disabled")
+            return
 
         try:
-            self.safety_manager = SafetyManager(fences=[self.farm_fence])
+            self.farm_fence = GeoFence(vertices=fence_vertices)
+            if SafetyManager is not None:
+                self.safety_manager = SafetyManager(fences=[self.farm_fence])
         except Exception as e:
             self.get_logger().warn(f"Safety manager not available: {e}")
             self.safety_manager = None
@@ -317,6 +363,46 @@ class IntelleSwarmPollinationNode(Node):
 
         self.get_logger().info("✅ ROS2 Communication setup complete")
 
+    def _init_px4_fleet(self):
+        """Attach to PX4 SITL via prebuilt DroneController (/px4_0 .. /px4_5)."""
+        self.get_logger().info("🔗 Connecting to PX4 fleet (DroneController)...")
+        try:
+            if os.path.isfile(FLEET_STATE_PATH):
+                os.remove(FLEET_STATE_PATH)
+        except OSError:
+            pass
+
+        capture_root = Path(__file__).resolve().parent / "multi_drone_script" / "captures"
+        try:
+            for i, drone_id in enumerate(self.drone_ids):
+                cap_dir = capture_root / f"drone{i}"
+                cap_dir.mkdir(parents=True, exist_ok=True)
+                controller = DroneController(
+                    namespace=f"/px4_{i}",
+                    target_sys=i + 1,
+                    drone_label=f"Drone {i}",
+                    instance_id=i,
+                    capture_dir=str(cap_dir),
+                )
+                fleet = FleetDrone(i, controller)
+                self.fleet_drones[drone_id] = fleet
+                for _ in range(5):
+                    rclpy.spin_once(controller, timeout_sec=0.1)
+                self.get_logger().info(
+                    f"   {drone_id} <-> /px4_{i} attached"
+                )
+        except Exception as e:
+            self.get_logger().error(f"PX4 fleet connect failed: {e}")
+            self.fleet_drones = {}
+
+    def _sync_state_from_px4(self):
+        """Copy live PX4 local position into drone_status (State)."""
+        for drone_id, fleet in self.fleet_drones.items():
+            status = self.drone_status[drone_id]
+            ctrl = fleet.drone
+            status.position = (ctrl.current_x, ctrl.current_y, ctrl.current_z)
+            fleet.sync_pose()
+
     def _state_callback(self, drone_id: str, msg: Odometry):
         """Process drone state updates from PX4"""
         if drone_id not in self.drone_status:
@@ -333,46 +419,30 @@ class IntelleSwarmPollinationNode(Node):
         if self.mission_active and status.battery > 0:
             status.battery -= 0.01  # Drain 1% every 10 seconds at 10Hz
 
+    def _assign_patch_from_position(self, drone_id: str):
+        """Assign nearest flower patch from live pose (camera pixels unused)."""
+        if drone_id not in self.drone_status:
+            return
+        status = self.drone_status[drone_id]
+        if status.current_target:
+            return
+        x, y, z = status.position
+        best = None
+        best_d = float("inf")
+        for patch in self.flower_patches:
+            distance = math.sqrt((x - patch.center_x) ** 2 + (y - patch.center_y) ** 2)
+            local_over_home = math.sqrt(x * x + y * y) < (patch.radius + 10)
+            if distance < patch.radius + 10 or local_over_home:
+                if distance < best_d:
+                    best_d = distance
+                    best = patch
+        if best is not None:
+            status.current_target = best
+
     def _image_callback(self, drone_id: str, msg: Image):
         """Process camera images for flower detection"""
-        if not self.flower_detector:
-            return
-
-        try:
-            # Convert ROS image to format for flower detection
-            # This would normally involve cv_bridge conversion
-            # For simulation, we'll mock the detection
-
-            status = self.drone_status[drone_id]
-            x, y, z = status.position
-
-            # Mock flower detection based on proximity to known patches
-            detected_flowers = []
-            for patch in self.flower_patches:
-                distance = math.sqrt((x - patch.center_x)**2 + (y - patch.center_y)**2)
-                if distance < patch.radius + 10:  # Detection range
-                    detected_flowers.append({
-                        'type': patch.flower_type,
-                        'distance': distance,
-                        'bearing': math.atan2(patch.center_y - y, patch.center_x - x),
-                        'priority': patch.priority
-                    })
-
-            # Update drone's target if needed
-            if detected_flowers and not status.current_target:
-                # Find highest priority flower
-                best_flower = max(detected_flowers, key=lambda f: f['priority'])
-                # Find corresponding patch
-                for patch in self.flower_patches:
-                    if patch.flower_type == best_flower['type']:
-                        dx = x - patch.center_x
-                        dy = y - patch.center_y
-                        if abs(dx) < patch.radius and abs(dy) < patch.radius:
-                            status.current_target = patch
-                            break
-
-        except Exception as e:
-            self.get_logger().warn(f"Flower detection error for {drone_id}: {e}")
+        del msg
+        self._assign_patch_from_position(drone_id)
 
     def _mission_control_callback(self, msg: String):
         """Handle mission control commands"""
@@ -391,28 +461,31 @@ class IntelleSwarmPollinationNode(Node):
 
     def _control_loop(self):
         """Main control loop - runs at 10Hz"""
+        self._sync_state_from_px4()
+        for drone_id in self.drone_ids:
+            self._assign_patch_from_position(drone_id)
+
         if not self.mission_active:
             return
 
-        current_time = time.time()
+        # Fleet flight is owned by mission_thread + DroneController. Do not
+        # issue competing go_to_safe / Twist from this timer.
+        if self.fleet_drones:
+            for drone_id in self.drone_ids:
+                self._update_pollination_status(drone_id, [0.0, 0.0, 0.0, 0.0, 1.0])
+            self._update_mission_metrics()
+            self._publish_mission_status()
+            return
 
-        # Process each drone
         for drone_id in self.drone_ids:
             if drone_id not in self.drone_status:
                 continue
-
-            status = self.drone_status[drone_id]
-
-            # Safety check
             if self._check_safety(drone_id):
                 self._execute_drone_mission(drone_id)
             else:
                 self._handle_safety_violation(drone_id)
 
-        # Update mission metrics
         self._update_mission_metrics()
-
-        # Publish mission status
         self._publish_mission_status()
 
     def _check_safety(self, drone_id: str) -> bool:
@@ -435,8 +508,14 @@ class IntelleSwarmPollinationNode(Node):
     def _execute_drone_mission(self, drone_id: str):
         """Execute pollination mission for a specific drone"""
         status = self.drone_status[drone_id]
-        brain = self.drone_brains.get(drone_id)
 
+        # Real flight is mission_thread + DroneController. Keep this loop for
+        # scoring only so 6x DroneBrain.step cannot starve offboard setpoints.
+        if self.fleet_drones:
+            self._update_pollination_status(drone_id, [0.0, 0.0, 0.0, 0.0, 1.0])
+            return
+
+        brain = self._get_drone_brain(drone_id)
         if not brain:
             return
 
@@ -553,6 +632,26 @@ class IntelleSwarmPollinationNode(Node):
 
         return cmd
 
+    def _get_drone_brain(self, drone_id: str):
+        """Create a DroneBrain on first use (scoring-only / no-fleet path)."""
+        if drone_id in self.drone_brains:
+            return self.drone_brains[drone_id]
+        if DroneBrain is None:
+            return None
+        try:
+            self.drone_brains[drone_id] = DroneBrain(
+                obs_dim=self.obs_dim,
+                msg_dim=self.msg_dim,
+                action_dim=self.action_dim,
+                world_latent_dim=16,
+                enable_collision_avoidance=False,
+            )
+            return self.drone_brains[drone_id]
+        except Exception as e:
+            self.get_logger().warn(f"DroneBrain not available for {drone_id}: {e}")
+            self.drone_brains[drone_id] = None
+            return None
+
     def _update_pollination_status(self, drone_id: str, action: List[float]):
         """Update pollination status based on drone actions"""
         status = self.drone_status[drone_id]
@@ -565,8 +664,11 @@ class IntelleSwarmPollinationNode(Node):
                 (x - patch.center_x)**2 + (y - patch.center_y)**2
             )
 
-            altitude_ok = abs(z - self.coverage_height) < 1.0
-            position_ok = distance_to_patch < patch.radius
+            altitude_m = abs(z)
+            altitude_ok = abs(altitude_m - self.coverage_height) < 1.0
+            position_ok = distance_to_patch < patch.radius or (
+                abs(x) < patch.radius and abs(y) < patch.radius
+            )
 
             if altitude_ok and position_ok and action[4] > 0.5:  # Pollination action
                 # Increase pollination status
@@ -584,8 +686,12 @@ class IntelleSwarmPollinationNode(Node):
 
         status = self.drone_status[drone_id]
         status.mission_state = "returning_home"
+        fleet = self.fleet_drones.get(drone_id)
+        if fleet is not None:
+            # Prebuilt collision-aware waypoint (FleetRegistry.resolve_waypoint)
+            fleet.go_to_safe(0.0, 0.0, -max(self.coverage_height, 3.0))
+            return
 
-        # Simple RTH command
         cmd = Twist()
         x, y, z = status.position
 
@@ -596,6 +702,26 @@ class IntelleSwarmPollinationNode(Node):
 
         if drone_id in self.cmd_publishers:
             self.cmd_publishers[drone_id].publish(cmd)
+
+    def _get_drone_brain(self, drone_id: str):
+        """Create a DroneBrain on first use (scoring-only path)."""
+        if drone_id in self.drone_brains:
+            return self.drone_brains[drone_id]
+        if DroneBrain is None:
+            return None
+        try:
+            self.drone_brains[drone_id] = DroneBrain(
+                obs_dim=self.obs_dim,
+                msg_dim=self.msg_dim,
+                action_dim=self.action_dim,
+                world_latent_dim=16,
+                enable_collision_avoidance=False,
+            )
+            return self.drone_brains[drone_id]
+        except Exception as e:
+            self.get_logger().warn(f"DroneBrain not available for {drone_id}: {e}")
+            self.drone_brains[drone_id] = None
+            return None
 
     def _update_mission_metrics(self):
         """Update mission performance metrics"""
@@ -642,18 +768,62 @@ class IntelleSwarmPollinationNode(Node):
     # Mission Control Methods
 
     def _start_pollination_mission(self):
-        """Start the pollination mission"""
+        """Start the pollination mission (auto-takeoff + grid like multi_drone_script)."""
+        if self.mission_threads and any(t.is_alive() for t in self.mission_threads):
+            self.get_logger().warn("Pollination mission already running")
+            return
+
         self.get_logger().info("🌻 Starting Pollination Mission!")
         self.mission_active = True
         self.mission_start_time = time.time()
 
-        # Reset flower patch status
         for patch in self.flower_patches:
             patch.pollination_status = 0.0
 
-        # Set all drones to mission state
-        for drone_id in self.drone_ids:
+        for i, drone_id in enumerate(self.drone_ids):
             self.drone_status[drone_id].mission_state = "active_mission"
+            self.drone_status[drone_id].current_target = self.flower_patches[i % len(self.flower_patches)]
+
+        if not self.fleet_drones:
+            self.get_logger().warn("No PX4 fleet attached — scoring only, no flight")
+            return
+
+        alt_ned = -abs(self.coverage_height)
+        for i, drone_id in enumerate(self.drone_ids):
+            fleet = self.fleet_drones[drone_id]
+            ctrl = fleet.drone
+            home = (ctrl.current_x, ctrl.current_y, ctrl.current_z)
+            center = (0.0, 0.0, alt_ned)
+            delay = i * 3.0
+            t = threading.Thread(
+                target=mission_thread,
+                args=(fleet, center, home, "cm", delay),
+                name=f"pollination_drone_{i}",
+                daemon=True,
+            )
+            t.start()
+            self.mission_threads.append(t)
+            self.get_logger().info(
+                f"   {drone_id}: takeoff + cm grid over spawn patch (stagger {delay:.0f}s)"
+            )
+
+    def _ensure_all_landed(self):
+        """Land any drone that is still armed (end of mission or --duration)."""
+        self.get_logger().info("🛬 Landing remaining drones...")
+        for fleet in self.fleet_drones.values():
+            fleet.drone._abort_mission = True
+        # Let each mission thread land itself so we do not fight the same PX4 instance.
+        deadline = time.time() + 80.0
+        while time.time() < deadline and any(t.is_alive() for t in self.mission_threads):
+            _spin_fleet(self, 0.05)
+        for drone_id, fleet in self.fleet_drones.items():
+            try:
+                if fleet.drone.is_armed() or abs(fleet.drone.current_z) > 0.4:
+                    land_and_wait(fleet.drone)
+                self.drone_status[drone_id].mission_state = "landed"
+            except Exception as exc:
+                self.get_logger().warn(f"Land failed for {drone_id}: {exc}")
+        self.mission_active = False
 
     def _pause_mission(self):
         """Pause the mission"""
@@ -680,19 +850,90 @@ class IntelleSwarmPollinationNode(Node):
             self.drone_status[drone_id].mission_state = "returning_home"
 
 
+def _spin_fleet(node: IntelleSwarmPollinationNode, timeout_sec: float = 0.05) -> None:
+    """Spin pollination node AND every DroneController (offboard setpoint timers)."""
+    rclpy.spin_once(node, timeout_sec=timeout_sec)
+    for fleet in node.fleet_drones.values():
+        rclpy.spin_once(fleet.drone, timeout_sec=0.0)
+
+
+def _wait_for_px4(node: IntelleSwarmPollinationNode, timeout_sec: float = 40.0) -> None:
+    """Drain PX4 status/pose callbacks before takeoff (same idea as multi_mission_runner)."""
+    node.get_logger().info("Waiting for PX4 uXRCE VehicleStatus / local position...")
+    end = time.time() + timeout_sec
+    while time.time() < end and rclpy.ok():
+        _spin_fleet(node, 0.1)
+        connected = sum(1 for f in node.fleet_drones.values() if f.drone.nav_state != 0)
+        if connected == len(node.fleet_drones) and node.fleet_drones:
+            break
+    for drone_id, fleet in node.fleet_drones.items():
+        d = fleet.drone
+        node.get_logger().info(
+            f"   {drone_id} nav={d.nav_state} arm={d.arm_state} "
+            f"pose=({d.current_x:.2f},{d.current_y:.2f},{d.current_z:.2f})"
+        )
+    if all(f.drone.nav_state == 0 for f in node.fleet_drones.values()):
+        node.get_logger().error(
+            "No PX4 VehicleStatus received — check instance_N/out.log for "
+            "'Timed out waiting for Gazebo world' or missing IMU"
+        )
+
+
 def main(args=None):
     """Main entry point"""
     rclpy.init(args=args)
+    install_thread_safe_spin()
 
     node = IntelleSwarmPollinationNode()
 
     try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
+        # Do NOT rclpy.spin(node): that executor never runs DroneController timers,
+        # so offboard setpoints never stream and drones stay on the ground.
+        if node.fleet_drones:
+            _wait_for_px4(node)
+            for fleet in node.fleet_drones.values():
+                for _ in range(20):
+                    rclpy.spin_once(fleet.drone, timeout_sec=0.1)
+        if getattr(node, "_auto_start", True):
+            node._start_pollination_mission()
+        started = time.time()
+        duration = float(getattr(node, "_duration_sec", 0) or 0)
+        if duration > 0:
+            node.get_logger().info(
+                f"Flight time cap: {duration:.0f}s then all drones land "
+                "(POLLINATION_DURATION / --duration)"
+            )
+        while rclpy.ok():
+            _spin_fleet(node, 0.05)
+            threads = getattr(node, "mission_threads", [])
+            if threads and not any(t.is_alive() for t in threads):
+                node._ensure_all_landed()
+                break
+            if duration > 0 and (time.time() - started) >= duration:
+                node.get_logger().warn(
+                    f"--duration {duration:.0f}s reached — landing remaining drones"
+                )
+                node._ensure_all_landed()
+                break
+    except (KeyboardInterrupt, ExternalShutdownException):
         node.get_logger().info("🛑 Shutting down pollination system...")
+        try:
+            node._ensure_all_landed()
+        except Exception:
+            pass
     finally:
+        for fleet in node.fleet_drones.values():
+            try:
+                fleet.close()
+                fleet.drone.destroy_node()
+            except Exception:
+                pass
         node.destroy_node()
-        rclpy.shutdown()
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

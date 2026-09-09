@@ -2,38 +2,38 @@
 ##############################################################################
 # install_and_run.sh
 #
-# Friend one-shot:
-#   1) Clone this GitHub repo (if needed)
-#   2) Install Gazebo Classic 11 + PX4-Classic BESIDE Harmonic (no Harmonic wipe)
-#   3) Run the timed GUI pollination demo
+# Clone/use this repo, install missing deps (ROS 2 Humble, Gazebo Harmonic,
+# PX4 SITL, MicroXRCEAgent, px4_msgs), then run the 6-drone farm mission.
 #
-# Usage (recommended):
+# Usage:
 #   git clone https://github.com/AbdurRouf230/Only_simulation_code_repo.git
 #   cd Only_simulation_code_repo
 #   bash install_and_run.sh
 #
-# Or:
-#   curl -fsSL https://raw.githubusercontent.com/AbdurRouf230/Only_simulation_code_repo/main/install_and_run.sh | bash
-#
 # Env:
-#   SKIP_INSTALL=1   # only clone/update + run demo (Classic already installed)
-#   SKIP_RUN=1       # only install Classic, do not start demo
-#   NUM_DRONES=1
-#   DURATION=90
-#   REPO_DIR=~/Only_simulation_code_repo
+#   SKIP_INSTALL=1     already have ROS2/PX4/gz/XRCE — only run
+#   SKIP_RUN=1         only install, do not start the sim
+#   NUM_DRONES=6
+#   DURATION=200
+#   PX4_DIR=~/PX4-Main/PX4-Autopilot
+#   ROS2_WS=~/ros2_ws
 ##############################################################################
 set -euo pipefail
 
+if [[ "$(uname -s)" != "Linux" ]]; then
+  echo "Run this inside WSL Ubuntu 22.04 (or Ubuntu 22.04), not Windows."
+  exit 1
+fi
+
 REPO_URL="${REPO_URL:-https://github.com/AbdurRouf230/Only_simulation_code_repo.git}"
 REPO_DIR="${REPO_DIR:-$HOME/Only_simulation_code_repo}"
-NUM_DRONES="${NUM_DRONES:-1}"
-DURATION="${DURATION:-90}"
+NUM_DRONES="${NUM_DRONES:-6}"
+DURATION="${DURATION:-200}"
 
 echo "============================================================="
-echo " Only_simulation_code_repo — install Classic + run demo"
+echo " Multi-drone pollination sim (PX4 + Gazebo Harmonic)"
 echo "============================================================="
 
-# ---- Locate or clone repo ----
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "")"
 if [[ -n "$SCRIPT_PATH" && -f "$(dirname "$SCRIPT_PATH")/intelleswarm-ai/genai_framework/px4_gazebo_sim/run_pollination_simulation.py" ]]; then
   REPO_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
@@ -43,47 +43,58 @@ elif [[ -f "$REPO_DIR/intelleswarm-ai/genai_framework/px4_gazebo_sim/run_pollina
   git -C "$REPO_DIR" pull --ff-only || true
 else
   echo "Cloning $REPO_URL -> $REPO_DIR"
-  rm -rf "$REPO_DIR"
   git clone "$REPO_URL" "$REPO_DIR"
 fi
 
 DEMO_DIR="$REPO_DIR/intelleswarm-ai/genai_framework/px4_gazebo_sim"
-INSTALL_SH="$REPO_DIR/script/install_classic_beside_harmonic.sh"
+INSTALL_SH="$REPO_DIR/script/install_deps.sh"
 test -f "$DEMO_DIR/run_pollination_simulation.py"
 test -f "$DEMO_DIR/px4_multi_drone.sh"
 test -f "$DEMO_DIR/agricultural_farm.world"
+test -f "$DEMO_DIR/multi_drone_script/drone_controller.py"
 test -f "$INSTALL_SH"
 
-# Fix Windows CRLF if present
-sed -i 's/\r$//' "$INSTALL_SH" "$DEMO_DIR"/*.sh "$DEMO_DIR"/*.py 2>/dev/null || true
+sed -i 's/\r$//' "$INSTALL_SH" "$DEMO_DIR"/*.sh "$DEMO_DIR"/*.py "$DEMO_DIR"/multi_drone_script/*.py 2>/dev/null || true
 chmod +x "$INSTALL_SH" "$DEMO_DIR/px4_multi_drone.sh"
 
-# ---- Install Classic beside Harmonic ----
 if [[ "${SKIP_INSTALL:-0}" != "1" ]]; then
   echo
-  echo "=== Installing Classic (Harmonic left alone) ==="
+  echo "=== Checking / installing dependencies ==="
   bash "$INSTALL_SH"
 else
-  echo "SKIP_INSTALL=1 — skipping Classic apt/PX4 build"
+  echo "SKIP_INSTALL=1 — not installing dependencies"
 fi
 
-# ---- Run timed GUI demo ----
 if [[ "${SKIP_RUN:-0}" == "1" ]]; then
-  echo "SKIP_RUN=1 — install done. Demo not started."
-  echo "Later:"
-  echo "  source ~/env_px4_classic.sh"
+  echo "SKIP_RUN=1 — install done. Later run:"
+  echo "  source /opt/ros/humble/setup.bash"
+  echo "  source \"\${ROS2_WS:-\$HOME/ros2_ws}/install/setup.bash\""
   echo "  cd \"$DEMO_DIR\""
   echo "  python3 run_pollination_simulation.py --num-drones $NUM_DRONES --duration $DURATION"
   exit 0
 fi
 
 echo
-echo "=== Running timed pollination demo (GUI) ==="
-# shellcheck disable=SC1090
-source "$HOME/env_px4_classic.sh"
+echo "=== Starting mission: $NUM_DRONES drones, duration ${DURATION}s ==="
+set +u
+# shellcheck disable=SC1091
+source /opt/ros/humble/setup.bash
+ROS2_WS="${ROS2_WS:-$HOME/ros2_ws}"
+if [[ -f "$ROS2_WS/install/setup.bash" ]]; then
+  # shellcheck disable=SC1091
+  source "$ROS2_WS/install/setup.bash"
+fi
+set -u
+
 cd "$DEMO_DIR"
 export DISPLAY="${DISPLAY:-:0}"
-export GAZEBO_IP="${GAZEBO_IP:-127.0.0.1}"
-unset DONT_RUN HEADLESS
-python3 run_pollination_simulation.py --num-drones "$NUM_DRONES" --duration "$DURATION"
-echo "DONE. Results JSON in: $DEMO_DIR/pollination_simulation_results_*.json"
+export GZ_IP="${GZ_IP:-127.0.0.1}"
+export HOME="${HOME:-$(eval echo ~)}"
+PX4_DIR="${PX4_DIR:-$HOME/PX4-Main/PX4-Autopilot}"
+
+python3 run_pollination_simulation.py \
+  --num-drones "$NUM_DRONES" \
+  --duration "$DURATION" \
+  --px4-dir "$PX4_DIR"
+
+echo "DONE."

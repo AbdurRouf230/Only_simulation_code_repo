@@ -1,5 +1,10 @@
 __pycache__/
 *.pyc
+*.pyo
 pollination_simulation_results_*.json
 *.log
 .DS_Store
+captures/
+miniconda.sh.gz
+.venv/
+venv/

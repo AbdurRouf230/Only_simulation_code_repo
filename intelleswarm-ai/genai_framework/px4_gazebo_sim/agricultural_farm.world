@@ -1,45 +1,41 @@
-<?xml version="1.0" ?>
+<?xml version="1.0" encoding="UTF-8"?>
 <!--
 Agricultural Farm World for IntelleSwarm Assistive Pollination Simulation
+Gazebo Harmonic (gz sim) SDF 1.9
 Features:
 - Large farm fields with crop rows
 - Flower patches requiring pollination
 - Realistic terrain and obstacles
-- Weather simulation capabilities
 - GPS coordinates for San Francisco area
 -->
-<sdf version="1.6">
+<sdf version="1.9">
   <world name="agricultural_farm">
 
-    <!-- Physics configuration -->
-    <physics name="default_physics" default="0" type="ode">
+    <physics type="ode">
       <max_step_size>0.004</max_step_size>
       <real_time_factor>1.0</real_time_factor>
       <real_time_update_rate>250</real_time_update_rate>
     </physics>
+    <gravity>0 0 -9.8</gravity>
+    <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
+    <atmosphere type="adiabatic"/>
 
-    <!-- Scene configuration -->
     <scene>
-      <sky>
-        <clouds>
-          <speed>12</speed>
-        </clouds>
-      </sky>
-      <ambient>0.4 0.4 0.4 1.0</ambient>
+      <grid>false</grid>
+      <ambient>0.4 0.4 0.4 1</ambient>
       <background>0.7 0.8 1.0 1</background>
-      <shadows>1</shadows>
+      <shadows>true</shadows>
     </scene>
 
-    <!-- Sun lighting -->
-    <light type="directional" name="sun">
+    <light name="sun" type="directional">
+      <pose>0 0 500 0 0 0</pose>
       <cast_shadows>true</cast_shadows>
-      <pose>0 0 10 0 0 0</pose>
-      <diffuse>0.8 0.8 0.8 1</diffuse>
-      <specular>0.2 0.2 0.2 1</specular>
+      <intensity>1</intensity>
       <direction>-0.5 0.1 -0.9</direction>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
     </light>
 
-    <!-- Ground plane with farm texture -->
     <model name="ground_plane">
       <static>true</static>
       <link name="link">
@@ -67,17 +63,14 @@ Features:
             </plane>
           </geometry>
           <material>
-            <script>
-              <uri>file://media/materials/scripts/gazebo.material</uri>
-              <name>Gazebo/Grass</name>
-            </script>
+            <ambient>0.25 0.40 0.18 1</ambient>
+            <diffuse>0.30 0.50 0.20 1</diffuse>
+            <specular>0.10 0.10 0.10 1</specular>
           </material>
         </visual>
       </link>
     </model>
 
-    <!-- Farm Fields - Multiple crop sections -->
-    <!-- Field 1: Corn rows (North section) -->
     <model name="corn_field_1">
       <pose>0 100 0.1 0 0 0</pose>
       <static>true</static>
@@ -89,10 +82,9 @@ Features:
             </box>
           </geometry>
           <material>
-            <script>
-              <uri>file://media/materials/scripts/gazebo.material</uri>
-              <name>Gazebo/Green</name>
-            </script>
+            <ambient>0.15 0.45 0.12 1</ambient>
+            <diffuse>0.20 0.55 0.15 1</diffuse>
+            <specular>0.05 0.05 0.05 1</specular>
           </material>
         </visual>
         <collision name="collision">
@@ -105,7 +97,6 @@ Features:
       </link>
     </model>
 
-    <!-- Field 2: Soybean field (South section) -->
     <model name="soybean_field_1">
       <pose>0 -100 0.1 0 0 0</pose>
       <static>true</static>
@@ -117,10 +108,9 @@ Features:
             </box>
           </geometry>
           <material>
-            <script>
-              <uri>file://media/materials/scripts/gazebo.material</uri>
-              <name>Gazebo/DarkGreen</name>
-            </script>
+            <ambient>0.10 0.28 0.08 1</ambient>
+            <diffuse>0.15 0.35 0.10 1</diffuse>
+            <specular>0.05 0.05 0.05 1</specular>
           </material>
         </visual>
         <collision name="collision">
@@ -133,8 +123,6 @@ Features:
       </link>
     </model>
 
-    <!-- Flower Patches for Pollination (High Priority Areas) -->
-    <!-- Sunflower patch 1 -->
     <model name="sunflower_patch_1">
       <pose>50 50 0.2 0 0 0</pose>
       <static>true</static>
@@ -147,10 +135,9 @@ Features:
             </cylinder>
           </geometry>
           <material>
-            <script>
-              <uri>file://media/materials/scripts/gazebo.material</uri>
-              <name>Gazebo/Yellow</name>
-            </script>
+            <ambient>0.80 0.65 0.10 1</ambient>
+            <diffuse>0.95 0.80 0.15 1</diffuse>
+            <specular>0.20 0.20 0.10 1</specular>
           </material>
         </visual>
         <collision name="collision">
@@ -164,7 +151,6 @@ Features:
       </link>
     </model>
 
-    <!-- Sunflower patch 2 -->
     <model name="sunflower_patch_2">
       <pose>-50 50 0.2 0 0 0</pose>
       <static>true</static>
@@ -177,10 +163,9 @@ Features:
             </cylinder>
           </geometry>
           <material>
-            <script>
-              <uri>file://media/materials/scripts/gazebo.material</uri>
-              <name>Gazebo/Yellow</name>
-            </script>
+            <ambient>0.80 0.65 0.10 1</ambient>
+            <diffuse>0.95 0.80 0.15 1</diffuse>
+            <specular>0.20 0.20 0.10 1</specular>
           </material>
         </visual>
         <collision name="collision">
@@ -194,7 +179,6 @@ Features:
       </link>
     </model>
 
-    <!-- Clover field (requires intensive pollination) -->
     <model name="clover_field">
       <pose>0 0 0.15 0 0 0</pose>
       <static>true</static>
@@ -206,10 +190,9 @@ Features:
             </box>
           </geometry>
           <material>
-            <script>
-              <uri>file://media/materials/scripts/gazebo.material</uri>
-              <name>Gazebo/Purple</name>
-            </script>
+            <ambient>0.40 0.18 0.45 1</ambient>
+            <diffuse>0.50 0.25 0.55 1</diffuse>
+            <specular>0.10 0.10 0.10 1</specular>
           </material>
         </visual>
         <collision name="collision">
@@ -222,8 +205,6 @@ Features:
       </link>
     </model>
 
-    <!-- Farm Infrastructure and Obstacles -->
-    <!-- Barn -->
     <model name="farm_barn">
       <pose>-150 0 0 0 0 1.57</pose>
       <static>true</static>
@@ -235,10 +216,9 @@ Features:
             </box>
           </geometry>
           <material>
-            <script>
-              <uri>file://media/materials/scripts/gazebo.material</uri>
-              <name>Gazebo/Red</name>
-            </script>
+            <ambient>0.55 0.12 0.08 1</ambient>
+            <diffuse>0.70 0.15 0.10 1</diffuse>
+            <specular>0.10 0.10 0.10 1</specular>
           </material>
         </visual>
         <collision name="collision">
@@ -251,7 +231,6 @@ Features:
       </link>
     </model>
 
-    <!-- Silo -->
     <model name="farm_silo">
       <pose>-130 30 0 0 0 0</pose>
       <static>true</static>
@@ -264,10 +243,9 @@ Features:
             </cylinder>
           </geometry>
           <material>
-            <script>
-              <uri>file://media/materials/scripts/gazebo.material</uri>
-              <name>Gazebo/Grey</name>
-            </script>
+            <ambient>0.45 0.45 0.45 1</ambient>
+            <diffuse>0.55 0.55 0.55 1</diffuse>
+            <specular>0.20 0.20 0.20 1</specular>
           </material>
         </visual>
         <collision name="collision">
@@ -281,7 +259,6 @@ Features:
       </link>
     </model>
 
-    <!-- Trees as obstacles and wind breaks -->
     <model name="tree_line_1">
       <pose>100 0 0 0 0 0</pose>
       <static>true</static>
@@ -294,10 +271,9 @@ Features:
             </cylinder>
           </geometry>
           <material>
-            <script>
-              <uri>file://media/materials/scripts/gazebo.material</uri>
-              <name>Gazebo/Wood</name>
-            </script>
+            <ambient>0.35 0.22 0.10 1</ambient>
+            <diffuse>0.45 0.30 0.15 1</diffuse>
+            <specular>0.05 0.05 0.05 1</specular>
           </material>
         </visual>
         <collision name="collision">
@@ -323,10 +299,9 @@ Features:
             </cylinder>
           </geometry>
           <material>
-            <script>
-              <uri>file://media/materials/scripts/gazebo.material</uri>
-              <name>Gazebo/Wood</name>
-            </script>
+            <ambient>0.35 0.22 0.10 1</ambient>
+            <diffuse>0.45 0.30 0.15 1</diffuse>
+            <specular>0.05 0.05 0.05 1</specular>
           </material>
         </visual>
         <collision name="collision">
@@ -352,10 +327,9 @@ Features:
             </cylinder>
           </geometry>
           <material>
-            <script>
-              <uri>file://media/materials/scripts/gazebo.material</uri>
-              <name>Gazebo/Wood</name>
-            </script>
+            <ambient>0.35 0.22 0.10 1</ambient>
+            <diffuse>0.45 0.30 0.15 1</diffuse>
+            <specular>0.05 0.05 0.05 1</specular>
           </material>
         </visual>
         <collision name="collision">
@@ -369,7 +343,6 @@ Features:
       </link>
     </model>
 
-    <!-- Fence posts for field boundaries -->
     <model name="fence_post_1">
       <pose>75 75 0 0 0 0</pose>
       <static>true</static>
@@ -382,10 +355,9 @@ Features:
             </cylinder>
           </geometry>
           <material>
-            <script>
-              <uri>file://media/materials/scripts/gazebo.material</uri>
-              <name>Gazebo/Wood</name>
-            </script>
+            <ambient>0.35 0.22 0.10 1</ambient>
+            <diffuse>0.45 0.30 0.15 1</diffuse>
+            <specular>0.05 0.05 0.05 1</specular>
           </material>
         </visual>
         <collision name="collision">
@@ -411,10 +383,9 @@ Features:
             </cylinder>
           </geometry>
           <material>
-            <script>
-              <uri>file://media/materials/scripts/gazebo.material</uri>
-              <name>Gazebo/Wood</name>
-            </script>
+            <ambient>0.35 0.22 0.10 1</ambient>
+            <diffuse>0.45 0.30 0.15 1</diffuse>
+            <specular>0.05 0.05 0.05 1</specular>
           </material>
         </visual>
         <collision name="collision">
@@ -428,40 +399,13 @@ Features:
       </link>
     </model>
 
-    <!-- Wind plugin for environmental simulation (disabled for new Gazebo compatibility) -->
-    <!--
-    <plugin name="wind_plugin" filename="libgazebo_wind_plugin.so">
-      <frameId>base_link</frameId>
-      <robotNamespace/>
-      <xyzOffset>0 0 0</xyzOffset>
-      <windVelocityMean>0 0 0</windVelocityMean>
-      <windVelocityMax>5 5 0</windVelocityMax>
-      <windVelocityVariance>0.1</windVelocityVariance>
-      <windDirectionMean>0 1 0</windDirectionMean>
-      <windDirectionVariance>0.05</windDirectionVariance>
-    </plugin>
-    -->
-
-    <!-- GPS coordinates for San Francisco area -->
     <spherical_coordinates>
       <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
       <latitude_deg>37.7749</latitude_deg>
       <longitude_deg>-122.4194</longitude_deg>
       <elevation>0</elevation>
-      <heading_deg>0</heading_deg>
     </spherical_coordinates>
-
-    <!-- State publisher plugin for world information (disabled for new Gazebo compatibility) -->
-    <!--
-    <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so">
-      <ros>
-        <namespace>/world_info</namespace>
-        <remapping>model_states:=model_states</remapping>
-        <remapping>link_states:=link_states</remapping>
-      </ros>
-      <update_rate>30.0</update_rate>
-    </plugin>
-    -->
 
   </world>
 </sdf>

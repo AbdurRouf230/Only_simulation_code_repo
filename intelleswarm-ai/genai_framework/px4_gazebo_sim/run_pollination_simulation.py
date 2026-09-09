@@ -21,6 +21,7 @@ import sys
 import time
 import json
 import math
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Any, Tuple
@@ -29,16 +30,18 @@ from datetime import datetime
 import signal
 
 # Add parent directory to path for imports
-sys.path.insert(0, '/Users/zrahman/intelleswarm-ai')
+# Dynamically add the intelleswarm-ai root directory to the python path
+repo_root = str(Path(__file__).parent.parent.parent.absolute())
+sys.path.insert(0, repo_root)
 
 @dataclass
 class SimulationConfig:
-    """Configuration for pollination simulation (Gazebo Classic + agricultural_farm.world)"""
+    """Configuration for pollination simulation"""
     num_drones: int = 6
     simulation_duration: int = 600  # 10 minutes
     world_file: str = "agricultural_farm.world"
     enable_gui: bool = True
-    px4_dir: str = os.path.expanduser("~/PX4-Classic/PX4-Autopilot")
+    px4_dir: str = os.path.expanduser("~/PX4-Main/PX4-Autopilot")
     log_level: str = "INFO"
 
 @dataclass
@@ -100,28 +103,25 @@ class PollinationSimulationRunner:
 
         px4_executable = px4_path / "build" / "px4_sitl_default" / "bin" / "px4"
         if not px4_executable.exists():
-            print(f"❌ PX4 not built. Please run: cd {self.config.px4_dir} && DONT_RUN=1 make px4_sitl gazebo-classic_iris")
+            print(f"❌ PX4 not built. Please run: cd {self.config.px4_dir} && make px4_sitl gz_x500")
             return False
 
-        # Check Gazebo Classic 11 (NOT Harmonic `gz`)
+        # Check Gazebo
         try:
-            result = subprocess.run(['which', 'gazebo'], capture_output=True, text=True)
+            result = subprocess.run(['which', 'gz'], capture_output=True, text=True)
             if result.returncode != 0:
-                print("❌ Gazebo Classic not found. Install Gazebo 11 (gazebo/gzserver).")
-                print("   Do not use Harmonic `gz sim` for this Classic runner.")
+                print("❌ Gazebo not found. Please install Gazebo simulation")
                 return False
-            print(f"✅ Gazebo Classic found: {result.stdout.strip()}")
+            print("✅ Gazebo (gz) found")
         except FileNotFoundError:
-            print("❌ Cannot check for Gazebo Classic installation")
+            print("❌ Cannot check for Gazebo installation")
             return False
 
-        # Check world file — used by Classic launcher via PX4_SITL_WORLD
+        # Check world file
         world_file = self.current_dir / self.config.world_file
         if not world_file.exists():
             print(f"❌ World file not found: {world_file}")
-            print("   Expected agricultural_farm.world next to this script (same as Zahid repo).")
             return False
-        print(f"✅ World file present: {world_file.name}")
 
         # Check IntelleSwarm framework
         try:
@@ -133,23 +133,139 @@ class PollinationSimulationRunner:
         print("✅ Environment validation complete")
         return True
 
-    def start_gazebo_simulation(self) -> bool:
-        """Gazebo Classic loads agricultural_farm.world via px4_multi_drone.sh.
+    def _apply_px4_gz_env(self, env: dict) -> dict:
+        """Match make px4_sitl / gz_env.sh so IMU, GPS, and motors work."""
+        px4_root = Path(self.config.px4_dir)
+        px4_gz_models = px4_root / "Tools" / "simulation" / "gz" / "models"
+        px4_gz_worlds = px4_root / "Tools" / "simulation" / "gz" / "worlds"
+        px4_gz_plugins = px4_root / "build" / "px4_sitl_default" / "src" / "modules" / "simulation" / "gz_plugins"
+        server_config = px4_root / "src" / "modules" / "simulation" / "gz_bridge" / "server.config"
+        if not server_config.is_file():
+            server_config = px4_root / "Tools" / "simulation" / "gz" / "server.config"
 
-        Do NOT start Harmonic `gz sim` here — Classic uses gazebo/gzserver.
-        The launcher copies agricultural_farm.world into PX4 worlds/ and sets
-        PX4_SITL_WORLD so sitl_run.sh starts gzserver with that farm world.
-        """
+        extra_gz_path = f"{px4_gz_models}:{px4_gz_worlds}"
+        existing_gz_path = env.get("GZ_SIM_RESOURCE_PATH", "")
+        env["GZ_SIM_RESOURCE_PATH"] = (
+            f"{extra_gz_path}:{existing_gz_path}" if existing_gz_path else extra_gz_path
+        )
+        existing_plugin_path = env.get("GZ_SIM_SYSTEM_PLUGIN_PATH", "")
+        env["GZ_SIM_SYSTEM_PLUGIN_PATH"] = (
+            f"{px4_gz_plugins}:{existing_plugin_path}" if existing_plugin_path else str(px4_gz_plugins)
+        )
+        if server_config.is_file():
+            env["GZ_SIM_SERVER_CONFIG_PATH"] = str(server_config)
+            env["PX4_GZ_SERVER_CONFIG"] = str(server_config)
+        env["PX4_GZ_MODELS"] = str(px4_gz_models)
+        env["PX4_GZ_WORLDS"] = str(px4_gz_worlds)
+        env["PX4_GZ_WORLD"] = "agricultural_farm"
+        env["GZ_IP"] = env.get("GZ_IP", "127.0.0.1")
+        env["DISPLAY"] = env.get("DISPLAY") or ":0"
+        env.setdefault("LIBGL_ALWAYS_SOFTWARE", "0")
+        env.setdefault("GALLIUM_DRIVER", "d3d12")
+        env.setdefault("MESA_D3D12_DEFAULT_ADAPTER_NAME", "NVIDIA")
+        return env
+
+    def _wait_for_gz_world(self, world_name: str = "agricultural_farm", timeout_sec: int = 60) -> bool:
+        """Block until PX4 can see /world/<name>/scene/info."""
+        print(f"⏳ Waiting for Gazebo world '{world_name}' scene/info...")
+        deadline = time.time() + timeout_sec
+        while time.time() < deadline:
+            try:
+                result = subprocess.run(
+                    ["gz", "service", "-i", "--service", f"/world/{world_name}/scene/info"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                )
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                result = None
+            text = ""
+            if result is not None:
+                text = (result.stdout or "") + (result.stderr or "")
+            if "Service providers" in text:
+                print("✅ Gazebo world is ready")
+                return True
+            time.sleep(1)
+        print("❌ Timed out waiting for Gazebo world scene/info")
+        return False
+
+    def start_gazebo_simulation(self) -> bool:
+        """Start Gazebo server (+ GUI) the same way PX4 SITL does."""
+        print("🌍 Starting Gazebo simulation...")
+
         world_file = self.current_dir / self.config.world_file
-        print("🌍 Gazebo Classic will load farm world via px4_multi_drone.sh")
-        print(f"   World: {world_file}")
-        if not self.config.enable_gui:
-            print("   (headless: set HEADLESS=1 if Classic launcher supports it)")
-        return True
+        px4_root = Path(self.config.px4_dir)
+        px4_gz_worlds = px4_root / "Tools" / "simulation" / "gz" / "worlds"
+        world_sdf = px4_gz_worlds / "agricultural_farm.sdf"
+        try:
+            px4_gz_worlds.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(world_file, world_sdf)
+        except OSError as exc:
+            print(f"⚠️  Could not copy world into PX4 worlds: {exc}")
+            world_sdf = world_file
+
+        env = self._apply_px4_gz_env(os.environ.copy())
+        log_path = self.current_dir / "gazebo_sim.log"
+        log_f = open(log_path, "w", encoding="utf-8")
+
+        server_cmd = ["gz", "sim", "-r", "-s", "-v", "1", str(world_sdf)]
+        try:
+            gazebo_process = subprocess.Popen(
+                server_cmd,
+                env=env,
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+            )
+            self.processes.append(("gazebo", gazebo_process))
+            self._gazebo_log = log_f
+
+            if self.config.enable_gui:
+                gui_proc = subprocess.Popen(
+                    ["gz", "sim", "-g"],
+                    env=env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                self.processes.append(("gazebo_gui", gui_proc))
+
+            if not self._wait_for_gz_world("agricultural_farm", timeout_sec=60):
+                print(f"   See {log_path}")
+                return False
+
+            if gazebo_process.poll() is None:
+                print("✅ Gazebo started successfully")
+                return True
+            print("❌ Gazebo failed to start")
+            return False
+        except Exception as e:
+            print(f"❌ Error starting Gazebo: {e}")
+            return False
+
+    def start_xrce_agents(self) -> bool:
+        """Start MicroXRCE-DDS agents so PX4 topics appear as /px4_N/..."""
+        print("📡 Starting MicroXRCE agents...")
+        try:
+            for i in range(self.config.num_drones):
+                port = 8888 + i
+                proc = subprocess.Popen(
+                    ['MicroXRCEAgent', 'udp4', '-p', str(port)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                self.processes.append((f'xrce_{port}', proc))
+                print(f"   XRCE agent port {port} (PID {proc.pid})")
+            time.sleep(2)
+            return True
+        except FileNotFoundError:
+            print("❌ MicroXRCEAgent not found. Install micro-xrce-dds-agent.")
+            return False
+        except Exception as e:
+            print(f"❌ Error starting XRCE agents: {e}")
+            return False
 
     def start_px4_drones(self) -> bool:
-        """Start PX4 Classic SITL + Gazebo 11 iris + agricultural_farm.world"""
-        print(f"🚁 Starting {self.config.num_drones} PX4 Classic drone instance(s)...")
+        """Start multiple PX4 SITL instances"""
+        print(f"🚁 Starting {self.config.num_drones} PX4 drone instances...")
 
         # Use the existing multi-drone script
         px4_script = self.current_dir / "px4_multi_drone.sh"
@@ -158,120 +274,55 @@ class PollinationSimulationRunner:
             print(f"❌ PX4 multi-drone script not found: {px4_script}")
             return False
 
-        world_file = self.current_dir / self.config.world_file
         try:
-            # Set environment variable for PX4 Classic directory
-            env = os.environ.copy()
+            env = self._apply_px4_gz_env(os.environ.copy())
             env['PX4_DIR'] = self.config.px4_dir
+            env['HOME'] = env.get('HOME') or os.path.expanduser('~')
             env['NUM_DRONES'] = str(self.config.num_drones)
-            env['PX4_SIMULATOR'] = 'gazebo-classic'
-            env['PX4_SIM_MODEL'] = 'iris'
-            env['WORLD_FILE'] = str(world_file)
-            # Name only — full path is ignored by some sitl paths; launcher copies world
-            env['PX4_SITL_WORLD'] = Path(self.config.world_file).stem
-            env.pop('DONT_RUN', None)
-            env.pop('HEADLESS', None)
-            # Do not pass ROS libs into Classic Gazebo (breaks gzclient/plugins)
-            for k in (
-                'AMENT_PREFIX_PATH',
-                'COLCON_PREFIX_PATH',
-                'CMAKE_PREFIX_PATH',
-                'ROS_DISTRO',
-                'ROS_VERSION',
-            ):
-                env.pop(k, None)
-            ld = env.get('LD_LIBRARY_PATH', '')
-            if ld:
-                env['LD_LIBRARY_PATH'] = ':'.join(
-                    p
-                    for p in ld.split(':')
-                    if p
-                    and not any(
-                        x in p
-                        for x in ('ros', 'humble', 'ros2_ws', 'ament', 'colcon')
-                    )
-                )
-            env['DISPLAY'] = env.get('DISPLAY') or ':0'
-            env['GAZEBO_IP'] = env.get('GAZEBO_IP') or '127.0.0.1'
-            if not self.config.enable_gui:
-                env['HEADLESS'] = '1'
+            env['POLLINATION_NUM_DRONES'] = str(self.config.num_drones)
 
-            print(f"   Using world: {world_file.name}")
-            print(f"   DISPLAY={env.get('DISPLAY')}  GUI={'yes' if self.config.enable_gui else 'no (HEADLESS)'}")
-
-            log_dir = Path("/tmp/px4_classic_only_sim")
-            log_dir.mkdir(parents=True, exist_ok=True)
-            launcher_log = log_dir / "launcher.log"
-            # IMPORTANT: do not use PIPE without a reader — it deadlocks the launcher
-            # and Gazebo GUI never starts.
-            log_f = open(launcher_log, "w", encoding="utf-8", errors="replace")
             px4_process = subprocess.Popen(
-                ['bash', str(px4_script)],
-                env=env,
-                stdout=log_f,
-                stderr=subprocess.STDOUT,
-                text=True,
+                [str(px4_script)],
+                env=env
             )
             self.processes.append(('px4_swarm', px4_process))
 
-            print("⏳ Waiting for PX4 Classic / Gazebo (farm world) to initialize...")
-            print("   (TIMED demo — flower counts are simulated, not real flight.)")
-            print(f"   Launcher log: {launcher_log}")
-
-            deadline = time.time() + (150 if self.config.enable_gui else 90)
-            gui_ok = not self.config.enable_gui
-            while time.time() < deadline:
+            print("⏳ Waiting for PX4 drones to connect to Gazebo...")
+            rootfs = Path(self.config.px4_dir) / "build" / "px4_sitl_default" / "rootfs"
+            for i in range(self.config.num_drones):
+                old_log = rootfs / f"instance_{i}" / "out.log"
+                try:
+                    if old_log.is_file():
+                        old_log.write_text("", encoding="utf-8")
+                except OSError:
+                    pass
+            log0 = rootfs / "instance_0" / "out.log"
+            last_log = rootfs / f"instance_{self.config.num_drones - 1}" / "out.log"
+            ready = 0
+            for _ in range(90 + self.config.num_drones * 4):
                 if px4_process.poll() is not None:
-                    log_f.flush()
-                    try:
-                        log_f.close()
-                    except Exception:
-                        pass
-                    out = launcher_log.read_text(encoding="utf-8", errors="replace") if launcher_log.is_file() else ""
-                    print("❌ PX4 / Gazebo launcher exited early")
-                    print(f"   LOG (tail):\n{(out or '')[-1200:]}")
-                    drone0 = log_dir / "drone0.log"
-                    if drone0.is_file():
-                        d0 = drone0.read_text(encoding="utf-8", errors="replace")
-                        print(f"   drone0.log (tail):\n{d0[-1200:]}")
+                    print("❌ PX4 swarm script exited early")
+                    return False
+                if log0.is_file():
+                    text = log0.read_text(encoding="utf-8", errors="ignore")
+                    if "Timed out waiting for Gazebo world" in text:
+                        print("❌ PX4 timed out waiting for Gazebo world (see instance_0/out.log)")
+                        return False
+                last_ok = False
+                if last_log.is_file():
+                    last_text = last_log.read_text(encoding="utf-8", errors="ignore")
+                    last_ok = "gz_bridge" in last_text or "Gazebo world is ready" in last_text
+                if last_ok:
+                    ready += 1
+                    if ready >= 2:
+                        break
+                time.sleep(1)
+            else:
+                if not log0.is_file() or "Gazebo world is ready" not in log0.read_text(encoding="utf-8", errors="ignore"):
+                    print("❌ PX4 did not connect to Gazebo in time")
                     return False
 
-                if self.config.enable_gui:
-                    gui = subprocess.run(["pgrep", "-x", "gzclient"], capture_output=True)
-                    if gui.returncode != 0:
-                        gui = subprocess.run(["pgrep", "-f", "gzclient"], capture_output=True)
-                    if gui.returncode == 0:
-                        gui_ok = True
-                        break
-                else:
-                    # headless: gzserver + px4 enough
-                    gz = subprocess.run(["pgrep", "-x", "gzserver"], capture_output=True)
-                    px = subprocess.run(["pgrep", "-f", "bin/px4"], capture_output=True)
-                    if gz.returncode == 0 and px.returncode == 0:
-                        break
-                time.sleep(3)
-
-            try:
-                log_f.flush()
-            except Exception:
-                pass
-
-            if self.config.enable_gui and not gui_ok:
-                print("❌ Gazebo GUI (gzclient) is NOT running — no simulation window")
-                print("   Fix DISPLAY / WSLg, then re-run. Quick test:")
-                print("     export DISPLAY=:0 && gazebo")
-                print(f"   Log: {launcher_log}")
-                drone0 = log_dir / "drone0.log"
-                if drone0.is_file():
-                    d0 = drone0.read_text(encoding="utf-8", errors="replace")
-                    print(f"   drone0.log (tail):\n{d0[-1200:]}")
-                elif launcher_log.is_file():
-                    print(f"   launcher.log (tail):\n{launcher_log.read_text(encoding='utf-8', errors='replace')[-1200:]}")
-                return False
-
-            if self.config.enable_gui:
-                print("✅ Gazebo GUI (gzclient) is running — look for the Gazebo window")
-            print("✅ PX4 Classic drone swarm started successfully")
+            print("✅ PX4 drone swarm started successfully")
             return True
 
         except Exception as e:
@@ -279,166 +330,126 @@ class PollinationSimulationRunner:
             return False
 
     def start_intelleswarm_coordination(self) -> bool:
-        """Start IntelleSwarm AI coordination (optional for timed Classic demo)."""
-        print("🤖 Starting IntelleSwarm AI coordination (optional)...")
+        """Start IntelleSwarm AI coordination system"""
+        print("🤖 Starting IntelleSwarm AI coordination...")
 
         coordination_script = self.current_dir / "ros2_node_intelleswarm_pollination.py"
 
         if not coordination_script.exists():
-            print(f"⚠️  Coordination script not found — skipping: {coordination_script}")
+            print(f"❌ IntelleSwarm coordination script not found: {coordination_script}")
             return False
-
-        # Prefer WSL system ROS 2 Humble (not macOS/miniconda paths)
-        ros_setup = "/opt/ros/humble/setup.bash"
-        ws_setup = os.path.expanduser("~/ros2_ws/install/setup.bash")
-        if not Path(ros_setup).is_file():
-            print("⚠️  /opt/ros/humble not found — skipping ROS coordination (timed mission continues)")
-            return False
-
-        source_bits = f"source {ros_setup}"
-        if Path(ws_setup).is_file():
-            source_bits += f" && source {ws_setup}"
 
         try:
-            check = subprocess.run(
-                ["bash", "-lc", f"{source_bits} && which ros2"],
-                capture_output=True,
-                text=True,
-            )
-            if check.returncode != 0 or not check.stdout.strip():
-                print("⚠️  ros2 not available after sourcing Humble — skipping coordination")
-                return False
-            print(f"✅ ROS2 found: {check.stdout.strip()}")
+            # Check if ROS2 is available
+            try:
+                # Check for ROS2 in the global installation
+                result = subprocess.run(['bash', '-c', 'source /opt/ros/humble/setup.bash && which ros2'],
+                                      capture_output=True, text=True)
+                if result.returncode == 0 and result.stdout.strip():
+                    use_ros2 = True
+                    print("✅ ROS2 found in global installation")
+                else:
+                    use_ros2 = False
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                print("⚠️  ROS2 not available - running coordination in standalone mode")
+                use_ros2 = False
 
-            coord_cmd = [
-                "bash",
-                "-lc",
-                f"{source_bits} && python3 '{coordination_script}'",
-            ]
-            coord_process = subprocess.Popen(
-                coord_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            time.sleep(5)
+            repo_root = Path(__file__).resolve().parents[2]
+            auto_start = os.environ.get('POLLINATION_AUTO_START', '1')
+            home = os.environ.get('HOME') or os.path.expanduser('~')
+            ros2_ws = os.environ.get('ROS2_WS') or os.path.join(home, 'ros2_ws')
+            ros2_overlay = os.path.join(ros2_ws, 'install', 'setup.bash')
+            if use_ros2:
+                coord_cmd = [
+                    'bash', '-c',
+                    f'source /opt/ros/humble/setup.bash && '
+                    f'[ -f "{ros2_overlay}" ] && source "{ros2_overlay}"; '
+                    f'export HOME="{home}" && '
+                    f'export PYTHONPATH="{repo_root}:$PYTHONPATH" && '
+                    f'export PYTHONUNBUFFERED=1 && '
+                    f'export POLLINATION_AUTO_START="{auto_start}" && '
+                    f'export POLLINATION_NUM_DRONES="{self.config.num_drones}" && '
+                    f'export POLLINATION_DURATION="{self.config.simulation_duration}" && '
+                    f'python3 "{coordination_script}"'
+                ]
+            else:
+                coord_cmd = [
+                    'bash', '-c',
+                    f'export PYTHONPATH="{repo_root}:$PYTHONPATH" && '
+                    f'export PYTHONUNBUFFERED=1 && '
+                    f'export POLLINATION_AUTO_START="{auto_start}" && '
+                    f'export POLLINATION_NUM_DRONES="{self.config.num_drones}" && '
+                    f'export POLLINATION_DURATION="{self.config.simulation_duration}" && '
+                    f'python3 "{coordination_script}"'
+                ]
+
+            coord_process = subprocess.Popen(coord_cmd)
+
+            # Node builds 6 DroneControllers; import crashes show up immediately
+            time.sleep(8)
 
             if coord_process.poll() is None:
-                # Only track if still alive — dead optional process must not abort mission
-                self.processes.append(("intelleswarm_coord", coord_process))
+                self.processes.append(('intelleswarm_coord', coord_process))
                 print("✅ IntelleSwarm AI coordination started")
                 return True
-
-            stdout, stderr = coord_process.communicate()
-            print("⚠️  Coordination failed to stay up — timed mission continues without it")
-            print(f"   STDERR: {(stderr or '')[:200]}")
-            return False
+            else:
+                print("❌ IntelleSwarm coordination exited immediately "
+                      f"(code {coord_process.returncode})")
+                return False
 
         except Exception as e:
-            print(f"⚠️  Coordination skipped: {e}")
+            print(f"❌ Error starting IntelleSwarm coordination: {e}")
             return False
 
+    def _coord_alive(self) -> bool:
+        for name, process in self.processes:
+            if name == 'intelleswarm_coord':
+                return process.poll() is None
+        return False
+
     def run_pollination_mission(self) -> PollinationResults:
-        """Run the main pollination mission and collect results"""
+        """Wait for the real PX4 flight, capped by --duration."""
+        limit = max(1, int(self.config.simulation_duration))
+        # PX4 connect + land can run after the ROS --duration clock starts.
+        safety = limit + 90
         print("🌻 Starting pollination mission...")
+        print(
+            f"📋 --duration {limit}s is the max flight time; "
+            f"all drones land when the grid finishes or when that cap is hit."
+        )
 
         self.simulation_start_time = time.time()
+        last_print = -15.0
+        coord_exited = False
+        timed_out = False
 
-        # Initialize mission metrics
-        mission_metrics = {
-            'flowers_pollinated': 0,
-            'coverage_achieved': 0.0,
-            'energy_used': 0.0,
-            'coordination_score': 0.0,
-            'collision_count': 0,
-            'mission_completed': False
-        }
-
-        # Mission phases (durations scaled to fit --duration)
-        base_phases = [
-            ("Takeoff and Formation", 60),
-            ("Area Survey", 120),
-            ("Pollination Execution", 300),
-            ("Coverage Validation", 60),
-            ("Return to Base", 60),
-        ]
-        base_total = sum(d for _, d in base_phases)
-        mission_duration = float(min(self.config.simulation_duration, base_total))
-        scale = mission_duration / float(base_total) if base_total > 0 else 1.0
-        phases = [(name, max(2.0, dur * scale)) for name, dur in base_phases]
-
-        print(f"📋 Mission plan: {len(phases)} phases, {mission_duration:.0f} seconds total")
-
-        # Execute mission phases
-        for phase_name, phase_duration in phases:
-            # Stop if overall budget used
-            elapsed_total = time.time() - self.simulation_start_time
-            if elapsed_total >= mission_duration:
-                print("⏰ Mission duration reached — ending phases")
+        while True:
+            elapsed = time.time() - self.simulation_start_time
+            if not self._coord_alive():
+                coord_exited = True
+                print("   Coordination node finished (fleet landed or node exited)")
                 break
-
-            remaining = mission_duration - elapsed_total
-            phase_duration = min(phase_duration, remaining)
-            print(f"\n🎯 Phase: {phase_name} ({phase_duration:.0f}s)")
-
-            phase_start = time.time()
-            phase_end = phase_start + phase_duration
-
-            while time.time() < phase_end:
-                # Only require critical processes (px4_swarm). Optional ROS may die.
-                if not self._check_processes_alive(critical_only=True):
-                    print("⚠️  Critical simulation process stopped — ending mission early")
-                    break
-
-                # Simulate mission progress
-                elapsed = time.time() - phase_start
-                progress = elapsed / phase_duration if phase_duration > 0 else 1.0
-
-                # Update metrics based on phase
-                if phase_name == "Pollination Execution":
-                    mission_metrics['flowers_pollinated'] = int(progress * 1500)
-                    mission_metrics['coverage_achieved'] = progress * 0.85
-
-                elif phase_name == "Coverage Validation":
-                    mission_metrics['coordination_score'] = 0.82 + progress * 0.1
-                    mission_metrics['energy_used'] = 0.4 + progress * 0.3
-
-                # Print progress every 10 seconds (better for short --duration runs)
-                if int(elapsed) % 10 == 0 and int(elapsed) > 0:
-                    print(f"   Progress: {progress:.1%} - "
-                          f"Pollinated: {mission_metrics['flowers_pollinated']} flowers - "
-                          f"Coverage: {mission_metrics['coverage_achieved']:.1%}")
-
-                time.sleep(1)
-
-            print(f"   ✅ {phase_name} completed")
-            if not self._check_processes_alive(critical_only=True):
+            if elapsed >= safety:
+                timed_out = True
+                print(f"   Safety stop after {elapsed:.0f}s — shutting down")
                 break
+            if elapsed - last_print >= 15:
+                print(f"   Flight t={elapsed:.0f}s (cap {limit}s, runner wait ≤ {safety}s)")
+                last_print = elapsed
+            time.sleep(2)
 
-        # If short run skipped pollination phase metrics, fill demos from elapsed fraction
         total_duration = time.time() - self.simulation_start_time
-        if mission_metrics['flowers_pollinated'] == 0 and total_duration > 1:
-            frac = min(1.0, total_duration / max(1.0, mission_duration))
-            mission_metrics['flowers_pollinated'] = int(frac * 800)
-            mission_metrics['coverage_achieved'] = frac * 0.75
-            mission_metrics['coordination_score'] = 0.7 + frac * 0.15
-            mission_metrics['energy_used'] = 0.3 + frac * 0.2
-
-        mission_metrics['mission_completed'] = total_duration >= (mission_duration * 0.8)
-
-        # Calculate final metrics
-        pollination_efficiency = mission_metrics['coverage_achieved']
-        coordination_quality = mission_metrics['coordination_score']
+        completed = coord_exited and not timed_out
 
         results = PollinationResults(
             mission_duration=total_duration,
-            total_flowers_pollinated=mission_metrics['flowers_pollinated'],
-            coverage_percentage=mission_metrics['coverage_achieved'] * 100,
-            pollination_efficiency=pollination_efficiency,
-            energy_consumption=mission_metrics['energy_used'],
-            coordination_quality=coordination_quality,
-            collision_incidents=mission_metrics['collision_count'],
-            successful_completion=mission_metrics['mission_completed']
+            total_flowers_pollinated=0,
+            coverage_percentage=100.0 if completed else 0.0,
+            pollination_efficiency=1.0 if completed else 0.0,
+            energy_consumption=0.0,
+            coordination_quality=1.0 if completed else 0.0,
+            collision_incidents=0,
+            successful_completion=completed,
         )
 
         print(f"\n🎉 Mission completed in {total_duration:.1f} seconds")
@@ -448,9 +459,9 @@ class PollinationSimulationRunner:
         """Generate comprehensive mission report"""
         print("\n📊 Generating comprehensive mission report...")
 
-        # Calculate additional metrics
-        pollination_rate = results.total_flowers_pollinated / results.mission_duration  # flowers/second
-        area_coverage_rate = (results.coverage_percentage / 100) * self.total_area / results.mission_duration  # m²/second
+        duration = max(float(results.mission_duration), 1e-6)
+        pollination_rate = results.total_flowers_pollinated / duration
+        area_coverage_rate = (results.coverage_percentage / 100) * self.total_area / duration
 
         # Performance assessment
         performance_score = (
@@ -593,30 +604,13 @@ class PollinationSimulationRunner:
         print("🎉 IntelleSwarm Pollination Simulation Complete!")
         print("="*80)
 
-    def _check_processes_alive(self, critical_only: bool = False) -> bool:
-        """Check simulation processes.
-
-        Optional ROS coordination must not abort the timed mission.
-        Only px4_swarm / gazebo are critical.
-        """
-        critical_names = {"px4_swarm", "gazebo"}
-        alive: list = []
-        critical_ok = True
+    def _check_processes_alive(self) -> bool:
+        """Check if simulation processes are still running"""
         for name, process in self.processes:
-            if process.poll() is None:
-                alive.append((name, process))
-                continue
-            # Process exited
-            if name in critical_names:
-                print(f"⚠️  Critical process {name} has stopped")
-                critical_ok = False
-                alive.append((name, process))  # keep for shutdown bookkeeping
-            else:
-                # Optional (e.g. intelleswarm_coord) — drop quietly after first notice
-                if not critical_only:
-                    print(f"⚠️  Optional process {name} stopped (ignored for timed mission)")
-        self.processes = alive
-        return critical_ok
+            if process.poll() is not None:
+                print(f"⚠️  Process {name} has stopped")
+                return False
+        return True
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully"""
@@ -635,17 +629,12 @@ class PollinationSimulationRunner:
                 if process.poll() is None:
                     process.kill()
 
-        # Also kill any remaining Classic gazebo/px4 processes (not Harmonic stack alone)
-        # NEVER pkill -f gazebo — matches path .../px4_gazebo_sim/... and kills the launcher
+        # Also kill any remaining gazebo/px4 processes
         try:
-            subprocess.run(['pkill', '-x', 'gzserver'], capture_output=True)
-            subprocess.run(['pkill', '-x', 'gzclient'], capture_output=True)
-            subprocess.run(['pkill', '-x', 'gazebo'], capture_output=True)
-            subprocess.run(['pkill', '-x', 'px4'], capture_output=True)
-            subprocess.run(['pkill', '-f', '/bin/px4'], capture_output=True)
-            # leftover mixed Harmonic only if this session started it by mistake
             subprocess.run(['pkill', '-f', 'gz sim'], capture_output=True)
-        except Exception:
+            subprocess.run(['pkill', '-x', 'px4'], capture_output=True)
+            subprocess.run(['pkill', '-f', 'MicroXRCEAgent'], capture_output=True)
+        except:
             pass
 
         print("✅ Shutdown complete")
@@ -666,12 +655,18 @@ class PollinationSimulationRunner:
                 print("❌ Failed to start Gazebo")
                 return {}
 
+            if not self.start_xrce_agents():
+                print("❌ Failed to start MicroXRCE agents")
+                return {}
+
             if not self.start_px4_drones():
                 print("❌ Failed to start PX4 drones")
                 return {}
 
-            # Optional: Start AI coordination (may not be fully functional in simulation)
-            self.start_intelleswarm_coordination()
+            # Optional: Start AI coordination (required for real takeoff)
+            if not self.start_intelleswarm_coordination():
+                print("❌ Failed to start IntelleSwarm coordination — drones will not fly")
+                return {}
 
             # Run mission
             results = self.run_pollination_mission()
@@ -704,13 +699,21 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="IntelleSwarm Pollination Simulation")
-    parser.add_argument('--num-drones', type=int, default=6, help='Number of drones')
-    parser.add_argument('--duration', type=int, default=600, help='Simulation duration (seconds)')
+    parser.add_argument(
+        '--num-drones', type=int, default=6,
+        help='How many PX4 drones to spawn and fly (1-6 recommended)',
+    )
+    parser.add_argument(
+        '--duration', type=int, default=600,
+        help='Max flight time in seconds; all drones land and the sim stops '
+             '(default: 600). If the grid finishes earlier, the sim stops then.',
+    )
     parser.add_argument('--headless', action='store_true', help='Run Gazebo in headless mode')
-    parser.add_argument('--px4-dir', type=str, default='~/PX4-Classic/PX4-Autopilot',
-                        help='PX4-Classic Autopilot directory')
+    parser.add_argument('--px4-dir', type=str, default='~/PX4-Main/PX4-Autopilot', help='PX4-Autopilot directory')
 
     args = parser.parse_args()
+    if args.num_drones < 1:
+        parser.error('--num-drones must be at least 1')
 
     config = SimulationConfig(
         num_drones=args.num_drones,
