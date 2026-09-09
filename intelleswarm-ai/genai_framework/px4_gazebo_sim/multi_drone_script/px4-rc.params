@@ -1,0 +1,11 @@
+#!/bin/sh
+# Sourced / appended at PX4 SITL start so ROS offboard can arm without QGC.
+param set-default NAV_DLL_ACT 0
+param set-default NAV_RCL_ACT 0
+param set-default COM_RCL_EXCEPT 4
+param set-default COM_ARM_WO_GPS 1
+param set-default CBRK_IO_SAFETY 22027
+param set-default CBRK_SUPPLY_CHK 894281
+param set-default COM_DISARM_PRFLT 0
+param set-default COM_ARM_CHK_ESCS 0
+param set-default GF_ACTION 0

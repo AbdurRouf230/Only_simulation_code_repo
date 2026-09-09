@@ -739,28 +739,17 @@ class DroneController(Node):
         return True
 
     def prepare_sitl_failsafes(self):
-        """Apply SITL failsafe params once per process (not on every takeoff)."""
+        """Apply SITL failsafe params once (airframe file does the real work)."""
         if getattr(self, '_sitl_params_done', False):
             return
-        # Prefer already-applied marker from apply_sitl_params.py
-        if os.path.isfile('/tmp/multidrone_sitl_params_ok'):
-            self._sitl_params_done = True
-            return
         here = os.path.dirname(os.path.abspath(__file__))
-        helpers = [
-            os.path.join(here, 'apply_sitl_params.py'),
-            '/mnt/h/Multidorne system/MultiDrone/apply_sitl_params.py',
-        ]
-        for helper in helpers:
-            if not os.path.isfile(helper):
-                continue
+        helper = os.path.join(here, 'apply_sitl_params.py')
+        if os.path.isfile(helper):
             try:
-                subprocess.run(['python3', helper], timeout=20, check=False)
-                self._sitl_params_done = True
-                return
+                subprocess.run(['python3', helper, '--force'], timeout=25, check=False)
             except Exception as exc:
                 self.get_logger().warn(f'SITL param helper failed: {exc}')
-        self._sitl_params_done = True  # don't retry forever
+        self._sitl_params_done = True
 
     def takeoff(self, altitude_m: float = 3.0):
         """Stream setpoints, engage offboard, arm (working sequence + SITL force arm)."""

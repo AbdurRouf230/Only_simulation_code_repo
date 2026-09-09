@@ -7,13 +7,14 @@ and can spam/stall the mavlink link if called repeatedly.
 """
 from __future__ import annotations
 
+import os
 import pathlib
 import shutil
 import sys
 import time
 
 HOME = pathlib.Path.home()
-PX4 = HOME / "PX4-Main/PX4-Autopilot"
+PX4 = pathlib.Path(os.environ.get("PX4_DIR") or (HOME / "PX4-Main/PX4-Autopilot"))
 SRC = PX4 / "ROMFS/px4fmu_common/init.d-posix/airframes"
 DST = PX4 / "build/px4_sitl_default/etc/init.d-posix/airframes"
 FLAG = pathlib.Path("/tmp/multidrone_sitl_params_ok")
@@ -41,39 +42,39 @@ def set_live_params():
     try:
         from pymavlink import mavutil
     except ImportError:
-        print("pymavlink not installed. In pxh run:")
-        for n, v in PARAMS:
-            print(f"  param set {n} {v}")
-        print("  param save")
+        print("pymavlink not installed — PX4 airframe params still apply at spawn")
         return False
 
-    # Use GCS port (14550). Do NOT bind onboard 14540 during flight control.
-    print("Setting SITL params via MAVLink UDP 14550 (INT32)...")
-    try:
-        m = mavutil.mavlink_connection("udpin:0.0.0.0:14550", timeout=5)
-        m.wait_heartbeat(timeout=8)
-        for name, val in PARAMS:
-            param_type = mavutil.mavlink.MAV_PARAM_TYPE_REAL32 if name.startswith("MPC_") else mavutil.mavlink.MAV_PARAM_TYPE_INT32
-            m.mav.param_set_send(
-                m.target_system,
-                m.target_component,
-                name.encode("utf-8"),
-                float(val),
-                param_type,
-            )
-            print("set", name, val)
-            time.sleep(0.05)
-        # Close so we don't keep holding the GCS mavlink port.
+    ports = [14550 + i for i in range(8)] + [14560 + i * 10 for i in range(8)]
+    any_ok = False
+    for port in ports:
         try:
-            m.close()
+            m = mavutil.mavlink_connection(f"udpin:0.0.0.0:{port}", timeout=2)
+            m.wait_heartbeat(timeout=3)
+            for name, val in PARAMS:
+                param_type = (
+                    mavutil.mavlink.MAV_PARAM_TYPE_REAL32
+                    if name.startswith("MPC_")
+                    else mavutil.mavlink.MAV_PARAM_TYPE_INT32
+                )
+                m.mav.param_set_send(
+                    m.target_system,
+                    m.target_component,
+                    name.encode("utf-8"),
+                    float(val),
+                    param_type,
+                )
+            print(f"set SITL arm params on UDP {port} sys={m.target_system}")
+            try:
+                m.close()
+            except Exception:
+                pass
+            any_ok = True
         except Exception:
-            pass
+            continue
+    if any_ok:
         FLAG.write_text("ok\n", encoding="utf-8")
-        return True
-    except Exception as exc:
-        print("live param set skipped:", exc)
-        print("Fallback — in pxh run: param set NAV_DLL_ACT 0; param set COM_RCL_EXCEPT 4; param save")
-        return False
+    return any_ok
 
 
 def main():

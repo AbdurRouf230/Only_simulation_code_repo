@@ -121,6 +121,24 @@ if ! wait_for_gz_world; then
     exit 1
 fi
 
+# Allow ROS offboard to arm in SITL without QGroundControl (datalink/RC checks).
+SITL_PARAMS="$SCRIPT_DIR/multi_drone_script/px4-rc.params"
+if [ -f "$SITL_PARAMS" ]; then
+    mkdir -p "$PX4_ETC/init.d-posix"
+    cp "$SITL_PARAMS" "$PX4_ETC/init.d-posix/px4-rc.params"
+    AF="$PX4_ETC/init.d-posix/airframes/4010_gz_x500_mono_cam"
+    if [ -f "$AF" ] && ! grep -q "pollination_sitl_arm" "$AF"; then
+        {
+            echo ""
+            echo "# pollination_sitl_arm"
+            grep -E '^param ' "$SITL_PARAMS" || true
+        } >> "$AF"
+        echo "✅ SITL arm params added to $AF"
+    else
+        echo "✅ SITL arm params: $PX4_ETC/init.d-posix/px4-rc.params"
+    fi
+fi
+
 # Launch PX4 SITL instances for each drone (instance 0..N-1 matches /px4_0 .. /px4_N)
 for i in $(seq 0 $((NUM_DRONES-1))); do
     drone_id=$i
